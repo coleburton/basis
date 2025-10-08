@@ -123,3 +123,34 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Shimmer effect for detected date ranges */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.shimmer-effect {
+  background: linear-gradient(
+    90deg,
+    rgba(219, 234, 254, 0.3) 0%,
+    rgba(147, 197, 253, 0.6) 50%,
+    rgba(219, 234, 254, 0.3) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+.dark .shimmer-effect {
+  background: linear-gradient(
+    90deg,
+    rgba(30, 58, 138, 0.2) 0%,
+    rgba(59, 130, 246, 0.4) 50%,
+    rgba(30, 58, 138, 0.2) 100%
+  );
+  background-size: 200% 100%;
+}

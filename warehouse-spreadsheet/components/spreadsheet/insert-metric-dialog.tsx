@@ -1,17 +1,33 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { Search, Database, Calendar, Filter, ChevronRight, Check } from "lucide-react"
+import { Search, Database, Calendar, Filter, ChevronRight, Check, AlertCircle, CheckCircle2 } from "lucide-react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { detectTimeContext, describeTimeContext, getTimeContextCount, findClosestDateRange, type DetectedTimeContext, type DateGrain, type DetectedDateRange } from "@/lib/date-detection"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+
+interface CellData {
+  raw: string
+  format?: {
+    bold?: boolean
+    italic?: boolean
+    underline?: boolean
+    align?: 'left' | 'center' | 'right'
+    numberFormat?: 'general' | 'currency' | 'percentage' | 'text'
+  }
+}
 
 interface InsertMetricDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  gridData?: CellData[][]
+  activeCell?: { row: number; col: number }
+  detectedRanges?: DetectedDateRange[]
 }
 
 // Sample models data
@@ -69,11 +85,43 @@ interface DimensionConfig {
   values: string[]
 }
 
-export function InsertMetricDialog({ open, onOpenChange }: InsertMetricDialogProps) {
+export function InsertMetricDialog({ open, onOpenChange, gridData, activeCell, detectedRanges = [] }: InsertMetricDialogProps) {
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [dimensionConfigs, setDimensionConfigs] = useState<Record<string, DimensionConfig>>({})
   const [selectedPeriod, setSelectedPeriod] = useState("month")
+
+  // Time context detection state
+  const [detectedContext, setDetectedContext] = useState<DetectedTimeContext | null>(null)
+  const [customStartPeriod, setCustomStartPeriod] = useState<string>("")
+  const [customEndPeriod, setCustomEndPeriod] = useState<string>("")
+  const [customGrain, setCustomGrain] = useState<DateGrain | null>(null)
+  const [isEditingTimeContext, setIsEditingTimeContext] = useState(false)
+
+  // Detect time context from grid headers using context-aware detection
+  const autoDetectedContext = useMemo(() => {
+    // If we have detected ranges, use the closest one to the active cell
+    if (detectedRanges.length > 0 && activeCell) {
+      const closestRange = findClosestDateRange(detectedRanges, activeCell.row)
+      return closestRange?.context || null
+    }
+
+    // Fallback: detect from first row if no detected ranges
+    if (!gridData || gridData.length === 0) return null
+    const headerRow = gridData[0] || []
+    const headers = headerRow.map(cell => cell.raw || "")
+    return detectTimeContext(headers, 1)
+  }, [detectedRanges, activeCell, gridData])
+
+  // Update detected context when auto-detection changes
+  useEffect(() => {
+    if (autoDetectedContext) {
+      setDetectedContext(autoDetectedContext)
+      setCustomGrain(autoDetectedContext.grain)
+      setCustomStartPeriod(autoDetectedContext.startPeriod)
+      setCustomEndPeriod(autoDetectedContext.endPeriod)
+    }
+  }, [autoDetectedContext])
 
   const filteredModels = SAMPLE_MODELS.filter(
     (model) =>
@@ -153,6 +201,19 @@ export function InsertMetricDialog({ open, onOpenChange }: InsertMetricDialogPro
     return `=METRICRANGE("${currentModel.id}", A2:A13${paramsStr})`
   }
 
+  const handleApplyTimeContextChanges = () => {
+    if (customGrain && customStartPeriod && customEndPeriod) {
+      setDetectedContext({
+        grain: customGrain,
+        periods: [], // We don't need to regenerate the full periods array for this use case
+        startPeriod: customStartPeriod,
+        endPeriod: customEndPeriod,
+        confidence: 'high',
+      })
+    }
+    setIsEditingTimeContext(false)
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[85vh] overflow-hidden flex flex-col">
@@ -162,6 +223,118 @@ export function InsertMetricDialog({ open, onOpenChange }: InsertMetricDialogPro
             Select a metric model and configure dimensions to insert data into your spreadsheet
           </DialogDescription>
         </DialogHeader>
+
+        {/* Detected Time Context Banner */}
+        {detectedContext && (
+          <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-full bg-primary/10 p-2">
+                  <Calendar className="h-4 w-4 text-primary" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-semibold text-sm">Detected Time Context: {describeTimeContext(detectedContext)}</h4>
+                    {autoDetectedContext && detectedContext === autoDetectedContext && (
+                      <Badge variant="outline" className="gap-1 text-xs">
+                        <CheckCircle2 className="h-3 w-3" />
+                        Auto-detected
+                      </Badge>
+                    )}
+                  </div>
+                  {!isEditingTimeContext ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {getTimeContextCount(detectedContext)} • Configure in Time Period tab
+                    </p>
+                  ) : (
+                    <div className="mt-3 space-y-3">
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">Grain</Label>
+                          <Select value={customGrain || undefined} onValueChange={(value) => setCustomGrain(value as DateGrain)}>
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue placeholder="Select grain" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="day">Day</SelectItem>
+                              <SelectItem value="week">Week</SelectItem>
+                              <SelectItem value="month">Month</SelectItem>
+                              <SelectItem value="quarter">Quarter</SelectItem>
+                              <SelectItem value="year">Year</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">Start Period</Label>
+                          <Input
+                            value={customStartPeriod}
+                            onChange={(e) => setCustomStartPeriod(e.target.value)}
+                            placeholder="e.g., 2024-Q1"
+                            className="h-8 text-xs"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">End Period</Label>
+                          <Input
+                            value={customEndPeriod}
+                            onChange={(e) => setCustomEndPeriod(e.target.value)}
+                            placeholder="e.g., 2024-Q4"
+                            className="h-8 text-xs"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="default" onClick={handleApplyTimeContextChanges} className="h-7 text-xs">
+                          Apply Changes
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setIsEditingTimeContext(false)
+                            if (autoDetectedContext) {
+                              setCustomGrain(autoDetectedContext.grain)
+                              setCustomStartPeriod(autoDetectedContext.startPeriod)
+                              setCustomEndPeriod(autoDetectedContext.endPeriod)
+                            }
+                          }}
+                          className="h-7 text-xs"
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              {!isEditingTimeContext && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setIsEditingTimeContext(true)}
+                  className="h-7 shrink-0 text-xs"
+                >
+                  Edit
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* No Time Context Warning */}
+        {!detectedContext && (
+          <div className="rounded-lg border border-orange-200 bg-orange-50 p-4 dark:border-orange-900/50 dark:bg-orange-950/20">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="h-4 w-4 text-orange-600 dark:text-orange-500 mt-0.5" />
+              <div>
+                <h4 className="font-semibold text-sm text-orange-900 dark:text-orange-100">No Time Context Detected</h4>
+                <p className="mt-1 text-xs text-orange-700 dark:text-orange-200">
+                  We couldn&apos;t detect date headers in your spreadsheet. You can manually configure the time period below.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="flex flex-1 gap-6 overflow-hidden">
           <div className="flex w-80 flex-col gap-4">
@@ -326,7 +499,7 @@ export function InsertMetricDialog({ open, onOpenChange }: InsertMetricDialogPro
                     <div className="space-y-2">
                       <Label className="text-sm font-medium">Time Granularity</Label>
                       <p className="text-sm text-muted-foreground">
-                        Select the time period granularity for this metric. This will align with your spreadsheet's
+                        Select the time period granularity for this metric. This will align with your spreadsheet&apos;s
                         period selector.
                       </p>
                       <div className="flex gap-2 mt-3">

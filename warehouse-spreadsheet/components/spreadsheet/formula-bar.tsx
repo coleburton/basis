@@ -3,7 +3,7 @@
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Check, X } from "lucide-react"
-import { KeyboardEvent } from "react"
+import { KeyboardEvent, useMemo } from "react"
 
 interface FormulaBarProps {
   activeCell: { row: number; col: number }
@@ -14,6 +14,8 @@ interface FormulaBarProps {
   onFormulaFocus?: () => void
   onFormulaToggleAnchor?: () => void
 }
+
+const REFERENCE_COLORS = ["#2563eb", "#dc2626", "#10b981", "#f97316"]
 
 export function FormulaBar({
   activeCell,
@@ -39,6 +41,44 @@ export function FormulaBar({
     }
   }
 
+  // Parse formula and colorize cell references
+  const colorizedFormula = useMemo(() => {
+    if (!formula.startsWith("=")) {
+      return formula
+    }
+
+    const pattern = /\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?/g
+    const parts: { text: string; color?: string }[] = []
+    let lastIndex = 0
+    let colorIndex = 0
+
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(formula)) !== null) {
+      // Add text before the match
+      if (match.index > lastIndex) {
+        parts.push({ text: formula.slice(lastIndex, match.index) })
+      }
+
+      // Add the colored reference
+      parts.push({
+        text: match[0],
+        color: REFERENCE_COLORS[colorIndex % REFERENCE_COLORS.length]
+      })
+
+      lastIndex = match.index + match[0].length
+      colorIndex++
+    }
+
+    // Add remaining text
+    if (lastIndex < formula.length) {
+      parts.push({ text: formula.slice(lastIndex) })
+    }
+
+    return parts
+  }, [formula])
+
+  const shouldShowColorized = formula.startsWith("=") && Array.isArray(colorizedFormula)
+
   return (
     <div className="flex h-12 items-center gap-2 border-b border-border bg-card px-4">
       {/* Cell Reference */}
@@ -57,13 +97,26 @@ export function FormulaBar({
       </div>
 
       {/* Formula Input */}
-      <div className="flex-1">
+      <div className="flex-1 relative">
+        {shouldShowColorized && (
+          <div className="absolute inset-0 pointer-events-none flex items-center px-3 font-mono text-sm">
+            {colorizedFormula.map((part, idx) => (
+              <span
+                key={idx}
+                style={{ color: part.color || 'inherit' }}
+                className={part.color ? 'font-semibold' : ''}
+              >
+                {part.text}
+              </span>
+            ))}
+          </div>
+        )}
         <Input
           value={formula}
           onChange={(e) => onFormulaChange(e.target.value)}
           onFocus={onFormulaFocus}
           onKeyDown={handleKeyDown}
-          className="h-8 border-0 bg-transparent font-mono text-sm focus-visible:ring-0"
+          className={`h-8 border-0 bg-transparent font-mono text-sm focus-visible:ring-0 ${shouldShowColorized ? 'text-transparent caret-black dark:caret-white' : ''}`}
           placeholder="Enter formula or value..."
         />
       </div>

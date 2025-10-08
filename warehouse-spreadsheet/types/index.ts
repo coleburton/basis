@@ -53,20 +53,103 @@ export interface CellOverride {
   created_at: string;
 }
 
+// =============================================================================
+// SEMANTIC LAYER - Data Models & Metrics
+// =============================================================================
+
+/**
+ * A Model represents a semantic definition of a data source (table/view)
+ * This is similar to a semantic model in Power BI or LookML in Looker
+ *
+ * Phase 1 (Now): Defined in code per-org
+ * Phase 2 (Future): Stored in database, user-configurable via UI
+ */
 export interface Model {
   id: string;
   org_id: string;
+  name: string; // User-friendly name, e.g., "users", "revenue"
+  description?: string;
+
+  // Source configuration
   database: string;
   schema: string;
-  name: string;
+  table: string;
   model_type: 'table' | 'view';
-  sql_definition: string | null;
-  created_by: string | null;
+  sql_definition?: string; // Optional custom SQL for views
+
+  // Time dimension configuration
+  primary_date_column: string; // e.g., "created_at", "order_date"
+  date_column_type: 'date' | 'timestamp'; // For proper truncation
+
+  // Metadata
+  created_by: string;
   created_at: string;
-  refreshed_at: string | null;
+  updated_at: string;
+  refreshed_at?: string;
 }
 
+/**
+ * Metrics are calculated measures from a Model
+ * They define HOW to aggregate the data (sum, count, etc.)
+ *
+ * Example:
+ * - Model: "users" table
+ * - Metric: "new_users" = COUNT(user_id) WHERE created_at in period
+ */
 export interface MetricDefinition {
+  id: string;
+  org_id: string;
+  model_id: string; // References the Model this metric is based on
+
+  name: string; // e.g., "new_users", "total_revenue"
+  display_name: string; // e.g., "New Users", "Total Revenue"
+  description?: string;
+
+  // Aggregation configuration
+  measure_column: string; // Column to aggregate, e.g., "user_id", "amount"
+  aggregation: 'sum' | 'avg' | 'count' | 'count_distinct' | 'min' | 'max';
+
+  // Optional filters applied to this metric
+  filters?: MetricFilter[];
+
+  // Formatting hints
+  format_type?: 'number' | 'currency' | 'percent';
+  currency_code?: string; // e.g., "USD"
+
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Filters that can be applied to a metric
+ * Example: status = 'active', region = 'US'
+ */
+export interface MetricFilter {
+  column: string;
+  operator: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'not_in' | 'like';
+  value: string | number | boolean | Array<string | number>;
+}
+
+/**
+ * WorkbookDataConnection represents the "attachment" of a Model to a Workbook
+ * This is like adding a data connection in Excel Power Query
+ * Multiple models can be attached to one workbook
+ */
+export interface WorkbookDataConnection {
+  id: string;
+  workbook_id: string;
+  model_id: string;
+
+  // Optional connection-level filters (applied to ALL metrics from this model in this workbook)
+  // Example: year = 2024, department = 'Sales'
+  global_filters?: Record<string, string | number>;
+
+  created_at: string;
+}
+
+// Legacy type for backward compatibility
+export interface MetricDefinitionLegacy {
   name: string;
   description: string;
   source_table: string; // Format: database.schema.table
