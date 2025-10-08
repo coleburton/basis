@@ -15,16 +15,27 @@ import {
 import { HyperFormula, DetailedCellError, type CellValue, type SimpleCellAddress } from "hyperformula"
 import { parseFormula } from "@/lib/formula/parser"
 import { cn } from "@/lib/utils"
+import { type DetectedDateRange } from "@/lib/date-detection"
 
 interface SpreadsheetGridProps {
   activeCell: { row: number; col: number }
   onCellClick: (cell: { row: number; col: number }) => void
   onCellChange?: (row: number, col: number, value: string) => void
   onFormulaChange?: (formula: string) => void
+  detectedRanges?: DetectedDateRange[]
+}
+
+interface CellFormat {
+  bold?: boolean
+  italic?: boolean
+  underline?: boolean
+  align?: 'left' | 'center' | 'right'
+  numberFormat?: 'general' | 'currency' | 'percentage' | 'text'
 }
 
 interface CellContent {
   raw: string // The raw value or formula
+  format?: CellFormat
 }
 
 export interface SpreadsheetGridHandle {
@@ -32,6 +43,9 @@ export interface SpreadsheetGridHandle {
   commitFormulaDraft: (value: string) => void
   cancelFormulaDraft: () => void
   toggleReferenceAnchor: () => void
+  applyFormatting: (format: Partial<CellFormat>) => void
+  getSelectionFormat: () => CellFormat | null
+  getGridData: () => CellContent[][]
 }
 
 // Sample data for initial state
@@ -329,11 +343,22 @@ const createInitialGridData = (): CellContent[][] => {
   return data
 }
 
+interface UndoAction {
+  type: 'cell-change' | 'bulk-change'
+  changes: Array<{
+    row: number
+    col: number
+    oldValue: string
+    newValue: string
+  }>
+}
+
 export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGridProps>(function SpreadsheetGrid({
   activeCell,
   onCellClick,
   onCellChange,
-  onFormulaChange
+  onFormulaChange,
+  detectedRanges = []
 }: SpreadsheetGridProps, ref) {
   const initialGrid = useMemo(() => createInitialGridData(), [])
   const [gridData, setGridData] = useState<CellContent[][]>(initialGrid)
@@ -342,6 +367,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   const cellRefs = useRef<HTMLDivElement[][]>([])
   const [columnWidths, setColumnWidths] = useState<number[]>(() => Array(columns.length).fill(DEFAULT_COLUMN_WIDTH))
   const [rowHeights, setRowHeights] = useState<number[]>(() => Array(NUM_ROWS).fill(DEFAULT_ROW_HEIGHT))
+  const [undoStack, setUndoStack] = useState<UndoAction[]>([])
+  const [redoStack, setRedoStack] = useState<UndoAction[]>([])
 
   const [selectedRanges, setSelectedRanges] = useState<CellRange[]>(() => [
     { start: { row: activeCell.row, col: activeCell.col }, end: { row: activeCell.row, col: activeCell.col } },
@@ -654,7 +681,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     [formatComputedValue, getEngineValue, gridData]
   )
 
-  const updateCellValue = useCallback((row: number, col: number, value: string) => {
+  const updateCellValue = useCallback((row: number, col: number, value: string, skipUndo = false) => {
     const hf = hyperFormulaRef.current
     const address: SimpleCellAddress = { sheet: sheetIdRef.current, row, col }
 
@@ -668,6 +695,17 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     }
 
     setGridData(prevData => {
+      const oldValue = prevData[row]?.[col]?.raw ?? ""
+
+      // Add to undo stack if value changed and not skipping undo
+      if (!skipUndo && oldValue !== value) {
+        setUndoStack(prev => [...prev, {
+          type: 'cell-change',
+          changes: [{ row, col, oldValue, newValue: value }]
+        }])
+        setRedoStack([]) // Clear redo stack on new change
+      }
+
       const newData = prevData.map(rowArr => [...rowArr])
       if (!newData[row]) {
         newData[row] = Array.from({ length: columns.length }, () => ({ raw: "" }))
@@ -684,6 +722,157 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       onFormulaChange(value)
     }
   }, [activeCell.col, activeCell.row, onCellChange, onFormulaChange])
+
+  const performUndo = useCallback(() => {
+    if (undoStack.length === 0) return
+
+    const action = undoStack[undoStack.length - 1]
+    setUndoStack(prev => prev.slice(0, -1))
+    setRedoStack(prev => [...prev, action])
+
+    // Apply the old values
+    action.changes.forEach(({ row, col, oldValue }) => {
+      updateCellValue(row, col, oldValue, true)
+    })
+  }, [undoStack, updateCellValue])
+
+  const performRedo = useCallback(() => {
+    if (redoStack.length === 0) return
+
+    const action = redoStack[redoStack.length - 1]
+    setRedoStack(prev => prev.slice(0, -1))
+    setUndoStack(prev => [...prev, action])
+
+    // Apply the new values
+    action.changes.forEach(({ row, col, newValue }) => {
+      updateCellValue(row, col, newValue, true)
+    })
+  }, [redoStack, updateCellValue])
+
+  const clearSelectedCells = useCallback(() => {
+    const envelope = getSelectionEnvelope()
+    if (!envelope) return
+
+    const changes: Array<{ row: number; col: number; oldValue: string; newValue: string }> = []
+
+    for (let row = envelope.start.row; row <= envelope.end.row; row++) {
+      for (let col = envelope.start.col; col <= envelope.end.col; col++) {
+        const oldValue = gridData[row]?.[col]?.raw ?? ""
+        if (oldValue !== "") {
+          changes.push({ row, col, oldValue, newValue: "" })
+        }
+      }
+    }
+
+    if (changes.length > 0) {
+      // Add to undo stack as a bulk change
+      setUndoStack(prev => [...prev, {
+        type: 'bulk-change',
+        changes
+      }])
+      setRedoStack([])
+
+      // Clear all cells
+      changes.forEach(({ row, col }) => {
+        updateCellValue(row, col, "", true)
+      })
+    }
+  }, [getSelectionEnvelope, gridData, updateCellValue])
+
+  const findEdgeCell = useCallback((startRow: number, startCol: number, dRow: number, dCol: number): { row: number; col: number } => {
+    const isBlank = (r: number, c: number) => {
+      const value = gridData[r]?.[c]?.raw ?? ""
+      return value.trim() === ""
+    }
+
+    let currentRow = startRow
+    let currentCol = startCol
+
+    // Check the next cell first
+    const nextRow = currentRow + dRow
+    const nextCol = currentCol + dCol
+
+    // Check bounds for next cell
+    if (nextRow < 0 || nextRow >= NUM_ROWS || nextCol < 0 || nextCol >= columns.length) {
+      // Can't move further, stay at current position
+      return { row: currentRow, col: currentCol }
+    }
+
+    const currentIsBlank = isBlank(currentRow, currentCol)
+    const nextIsBlank = isBlank(nextRow, nextCol)
+
+    if (currentIsBlank) {
+      // Starting in blank: jump to first non-blank cell in direction
+      currentRow = nextRow
+      currentCol = nextCol
+
+      while (true) {
+        if (!isBlank(currentRow, currentCol)) {
+          // Found first non-blank cell
+          return { row: currentRow, col: currentCol }
+        }
+
+        const scanNextRow = currentRow + dRow
+        const scanNextCol = currentCol + dCol
+
+        // Check bounds
+        if (scanNextRow < 0 || scanNextRow >= NUM_ROWS || scanNextCol < 0 || scanNextCol >= columns.length) {
+          // Hit boundary
+          return { row: currentRow, col: currentCol }
+        }
+
+        currentRow = scanNextRow
+        currentCol = scanNextCol
+      }
+    } else if (nextIsBlank) {
+      // Current has data, next is blank: skip blanks to find next data region
+      currentRow = nextRow
+      currentCol = nextCol
+
+      while (true) {
+        if (!isBlank(currentRow, currentCol)) {
+          // Found first cell of next data region
+          return { row: currentRow, col: currentCol }
+        }
+
+        const scanNextRow = currentRow + dRow
+        const scanNextCol = currentCol + dCol
+
+        // Check bounds
+        if (scanNextRow < 0 || scanNextRow >= NUM_ROWS || scanNextCol < 0 || scanNextCol >= columns.length) {
+          // Hit boundary in blank region, stay at boundary
+          return { row: currentRow, col: currentCol }
+        }
+
+        currentRow = scanNextRow
+        currentCol = scanNextCol
+      }
+    } else {
+      // Both current and next have data: find edge of current data region
+      currentRow = nextRow
+      currentCol = nextCol
+
+      while (true) {
+        const scanNextRow = currentRow + dRow
+        const scanNextCol = currentCol + dCol
+
+        // Check bounds
+        if (scanNextRow < 0 || scanNextRow >= NUM_ROWS || scanNextCol < 0 || scanNextCol >= columns.length) {
+          // Hit boundary, current is the edge
+          return { row: currentRow, col: currentCol }
+        }
+
+        if (isBlank(scanNextRow, scanNextCol)) {
+          // Next is blank, current is the edge
+          return { row: currentRow, col: currentCol }
+        }
+
+        // Keep moving
+        currentRow = scanNextRow
+        currentCol = scanNextCol
+      }
+    }
+  }, [gridData])
 
   const copySelection = useCallback(
     async (event?: ReactClipboardEvent<HTMLDivElement>) => {
@@ -783,6 +972,17 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                 value = cellData.display
               }
             }
+          } else if (value.startsWith("=")) {
+            // For external pastes or when internal metadata is unavailable,
+            // still adjust formula references based on the paste position
+            // Assume the formula was copied from the top-left of the paste range
+            const sourceRow = target.row
+            const sourceCol = target.col
+            value = adjustFormulaReferences(
+              value,
+              destRow - sourceRow,
+              destCol - sourceCol,
+            )
           }
 
           updateCellValue(destRow, destCol, value)
@@ -1011,15 +1211,20 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         const currentPending = pendingReferenceRef.current
         if (!currentPending) return prev
 
-        const before = prev.slice(0, currentPending.startIndex)
-        const after = prev.slice(currentPending.endIndex)
+        // Ensure we get the exact current state of the indices
+        const startIdx = currentPending.startIndex
+        const endIdx = currentPending.endIndex
+
+        const before = prev.slice(0, startIdx)
+        const after = prev.slice(endIdx)
         const next = `${before}${referenceString}${after}`
 
         if (next === prev) {
           return prev
         }
 
-        currentPending.endIndex = currentPending.startIndex + referenceString.length
+        // Update the end index based on the new reference string length
+        currentPending.endIndex = startIdx + referenceString.length
         return next
       })
 
@@ -1114,7 +1319,43 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     updateReferenceSelection(row, col)
   }
 
-  const handleCellKeyDown = (e: KeyboardEvent, row: number, col: number) => {
+  const applyFormatting = useCallback((format: Partial<CellFormat>) => {
+    const envelope = getSelectionEnvelope()
+    if (!envelope) return
+
+    setGridData(prevData => {
+      const newData = prevData.map(rowArr => [...rowArr])
+
+      for (let row = envelope.start.row; row <= envelope.end.row; row++) {
+        for (let col = envelope.start.col; col <= envelope.end.col; col++) {
+          if (!newData[row]) {
+            newData[row] = Array.from({ length: columns.length }, () => ({ raw: "" }))
+          }
+          const cell = newData[row][col] || { raw: "" }
+          newData[row][col] = {
+            ...cell,
+            format: {
+              ...cell.format,
+              ...format
+            }
+          }
+        }
+      }
+
+      return newData
+    })
+  }, [getSelectionEnvelope])
+
+  const getSelectionFormat = useCallback((): CellFormat | null => {
+    const envelope = getSelectionEnvelope()
+    if (!envelope) return null
+
+    // Get format from first cell in selection
+    const firstCell = gridData[envelope.start.row]?.[envelope.start.col]
+    return firstCell?.format || {}
+  }, [getSelectionEnvelope, gridData])
+
+  const handleCellKeyDown = useCallback((e: KeyboardEvent, row: number, col: number) => {
     if (!editingCell && (e.metaKey || e.ctrlKey)) {
       const key = e.key.toLowerCase()
       if (key === "c") {
@@ -1138,6 +1379,38 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         const fullRange = normalizeRange({ row: 0, col: 0 }, { row: NUM_ROWS - 1, col: columns.length - 1 })
         applySelection([fullRange], { row: 0, col: 0 })
         onCellClick({ row: 0, col: 0 })
+        return
+      }
+      if (key === "b") {
+        e.preventDefault()
+        const currentFormat = getSelectionFormat()
+        applyFormatting({ bold: !currentFormat?.bold })
+        return
+      }
+      if (key === "i") {
+        e.preventDefault()
+        const currentFormat = getSelectionFormat()
+        applyFormatting({ italic: !currentFormat?.italic })
+        return
+      }
+      if (key === "u") {
+        e.preventDefault()
+        const currentFormat = getSelectionFormat()
+        applyFormatting({ underline: !currentFormat?.underline })
+        return
+      }
+      if (key === "z") {
+        e.preventDefault()
+        if (e.shiftKey) {
+          performRedo()
+        } else {
+          performUndo()
+        }
+        return
+      }
+      if (key === "y") {
+        e.preventDefault()
+        performRedo()
         return
       }
     }
@@ -1190,8 +1463,19 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
           const anchor = selectionAnchorRef.current
           const baseRow = e.shiftKey && currentEnvelope ? currentEnvelope.end.row : anchor.row
           const baseCol = e.shiftKey && currentEnvelope ? currentEnvelope.end.col : anchor.col
-          const targetRow = clamp(baseRow + dRow, 0, NUM_ROWS - 1)
-          const targetCol = clamp(baseCol + dCol, 0, columns.length - 1)
+
+          let targetRow: number
+          let targetCol: number
+
+          // Cmd/Ctrl + Arrow: Jump to edge of data region
+          if (e.metaKey || e.ctrlKey) {
+            const edge = findEdgeCell(baseRow, baseCol, dRow, dCol)
+            targetRow = edge.row
+            targetCol = edge.col
+          } else {
+            targetRow = clamp(baseRow + dRow, 0, NUM_ROWS - 1)
+            targetCol = clamp(baseCol + dCol, 0, columns.length - 1)
+          }
 
           suppressSelectionSyncRef.current = true
           if (e.shiftKey) {
@@ -1206,7 +1490,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         case "Delete":
         case "Backspace":
           e.preventDefault()
-          updateCellValue(row, col, "")
+          clearSelectedCells()
           break
         default:
           // Start editing on any character key
@@ -1216,7 +1500,23 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
           }
       }
     }
-  }
+  }, [
+    editingCell,
+    copySelection,
+    pasteFromClipboard,
+    cutSelection,
+    performUndo,
+    performRedo,
+    applySelection,
+    onCellClick,
+    extendSelectionTo,
+    selectSingleCell,
+    clearSelectedCells,
+    findEdgeCell,
+    getSelectionEnvelope,
+    getSelectionFormat,
+    applyFormatting
+  ])
 
   const handleInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (functionSuggestions.length > 0) {
@@ -1259,6 +1559,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       const currentCursor = keyboardReferenceCursorRef.current
 
       if (!referenceSelectionActiveRef.current || !anchor || !currentCursor) {
+        // Start new reference selection from active cell
         const anchorRow = activeCell.row
         const anchorCol = activeCell.col
         const nextRow = clamp(anchorRow + dRow, 0, NUM_ROWS - 1)
@@ -1273,13 +1574,39 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         return
       }
 
+      // Continue existing reference selection
       const targetRow = clamp(currentCursor.row + dRow, 0, NUM_ROWS - 1)
       const targetCol = clamp(currentCursor.col + dCol, 0, columns.length - 1)
 
       if (e.shiftKey) {
         updateReferenceSelection(targetRow, targetCol)
       } else {
-        startReferenceSelection(targetRow, targetCol, { bindMouseUp: false })
+        // Replace current reference with new cell (update anchor and indices)
+        const pending = pendingReferenceRef.current
+        if (pending) {
+          const input = inputRef.current
+          if (input) {
+            const currentValue = input.value
+            const address = getCellAddress(targetRow, targetCol)
+            const before = currentValue.slice(0, pending.startIndex)
+            const after = currentValue.slice(pending.endIndex)
+            const nextValue = `${before}${address}${after}`
+
+            pending.anchor = { row: targetRow, col: targetCol }
+            pending.endIndex = pending.startIndex + address.length
+
+            setEditValue(nextValue)
+            setReferencePreview({
+              start: { row: targetRow, col: targetCol },
+              end: { row: targetRow, col: targetCol },
+            })
+            keyboardReferenceCursorRef.current = { row: targetRow, col: targetCol }
+
+            requestAnimationFrame(() => {
+              inputRef.current?.setSelectionRange(pending.endIndex, pending.endIndex)
+            })
+          }
+        }
       }
       return
     }
@@ -1370,6 +1697,9 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       toggleReferenceAnchor: () => {
         toggleReferenceAnchors()
       },
+      applyFormatting,
+      getSelectionFormat,
+      getGridData: () => gridData,
     }),
     [
       activeCell.col,
@@ -1379,6 +1709,9 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       finalizeReferenceSelection,
       toggleReferenceAnchors,
       updateCellValue,
+      applyFormatting,
+      getSelectionFormat,
+      gridData,
     ]
   )
 
@@ -1389,7 +1722,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   return (
     <div className="relative">
       {/* Column Headers */}
-      <div className="sticky top-0 z-20 flex border-b border-border bg-muted">
+      <div className="sticky top-0 z-20 flex border-b border-border bg-muted select-none">
         <div className="flex h-8 w-12 shrink-0 items-center justify-center border-r border-border bg-muted" />
         {columns.map((col, idx) => {
           const isColumnSelected = selectedRanges.some((range) => idx >= range.start.col && idx <= range.end.col)
@@ -1423,7 +1756,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
             {/* Row Number */}
             <div
               className={cn(
-                "relative flex w-12 shrink-0 items-center justify-center border-r border-border bg-muted font-mono text-xs font-medium",
+                "relative flex w-12 shrink-0 items-center justify-center border-r border-border bg-muted font-mono text-xs font-medium select-none",
                 selectedRanges.some((range) => rowIdx >= range.start.row && rowIdx <= range.end.row)
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground"
@@ -1438,10 +1771,27 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
             {/* Row Cells */}
             {columns.map((_, colIdx) => {
-              const rawValue = gridData[rowIdx]?.[colIdx]?.raw ?? ""
+              const cellData = gridData[rowIdx]?.[colIdx]
+              const rawValue = cellData?.raw ?? ""
+              const cellFormat = cellData?.format
               const isFormula = rawValue.startsWith("=")
               const engineValue = isFormula ? getEngineValue(rowIdx, colIdx) : null
-              const displayValue = isFormula ? formatComputedValue(rowIdx, engineValue) : rawValue
+
+              // Apply number formatting based on cellFormat
+              let displayValue = isFormula ? formatComputedValue(rowIdx, engineValue) : rawValue
+              if (cellFormat?.numberFormat && !isFormula && rawValue) {
+                const numericValue = Number(rawValue.replace(/[,$%]/g, ""))
+                if (!Number.isNaN(numericValue)) {
+                  if (cellFormat.numberFormat === 'currency') {
+                    displayValue = `$${numberFormatter.format(numericValue)}`
+                  } else if (cellFormat.numberFormat === 'percentage') {
+                    displayValue = percentFormatter.format(numericValue / 100)
+                  } else if (cellFormat.numberFormat === 'general') {
+                    displayValue = numberFormatter.format(numericValue)
+                  }
+                }
+              }
+
               const isActive = activeCell.row === rowIdx && activeCell.col === colIdx
               const isEditing = editingCell?.row === rowIdx && editingCell?.col === colIdx
               const isHeader = colIdx === 0 && rawValue !== ""
@@ -1462,6 +1812,16 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                   colIdx <= range.end.col
               )
               const isSelected = selectedRanges.some((range) => isCellInRange(range, rowIdx, colIdx))
+
+              // Check if this cell is in a detected date range (both row and column must match)
+              const dateRange = detectedRanges.find(r =>
+                r.rowIndex === rowIdx &&
+                colIdx >= r.startCol &&
+                colIdx <= r.endCol
+              )
+              const isInDateRange = dateRange !== undefined
+              const isNewDateRange = dateRange?.isNew || false
+
               const highlightStyle = activeHighlight
                 ? {
                     boxShadow: `inset 0 0 0 2px ${activeHighlight.color}`,
@@ -1487,7 +1847,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                   onPaste={handlePasteEvent}
                   tabIndex={isActive ? 0 : -1}
                   className={cn(
-                    "relative flex h-full shrink-0 cursor-cell items-center border-r border-border px-2 text-sm transition-colors",
+                    "relative flex h-full shrink-0 cursor-cell items-center border-r border-border px-2 text-sm transition-colors select-none",
                     isActive && "ring-2 ring-primary ring-inset z-10",
                     isHeader && "bg-muted font-medium text-foreground",
                     !isHeader && "bg-card text-foreground hover:bg-accent",
@@ -1495,6 +1855,16 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                     isPercentage && "text-success",
                     isFormula && "text-primary font-mono",
                     isSelected && !isActive && !activeHighlight && "bg-primary/5",
+                    // Apply cell formatting
+                    cellFormat?.bold && "font-bold",
+                    cellFormat?.italic && "italic pr-4",
+                    cellFormat?.underline && "underline",
+                    cellFormat?.align === 'left' && "justify-start",
+                    cellFormat?.align === 'center' && "justify-center",
+                    cellFormat?.align === 'right' && "justify-end",
+                    // Date range detection effects
+                    isNewDateRange && !isHeader && "shimmer-effect",
+                    isInDateRange && !isNewDateRange && !isHeader && "bg-blue-50/30 dark:bg-blue-950/10",
                   )}
                   style={{ width: columnWidths[colIdx], ...highlightStyle }}
                 >
@@ -1541,7 +1911,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                       )}
                     </>
                   ) : (
-                    <span className="truncate">{displayValue}</span>
+                    <span className={cn("truncate", cellFormat?.italic && "pr-1")}>{displayValue}</span>
                   )}
                 </div>
               )

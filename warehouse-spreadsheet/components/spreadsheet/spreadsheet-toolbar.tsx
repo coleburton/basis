@@ -15,7 +15,18 @@ import {
   RefreshCw,
   Settings,
   Database,
+  ArrowLeft,
+  Bold,
+  Italic,
+  Underline,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  Percent,
+  DollarSign,
+  Hash,
 } from "lucide-react"
+import Link from "next/link"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,16 +36,45 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Badge } from "@/components/ui/badge"
 
-interface SpreadsheetToolbarProps {
-  onInsertMetric?: () => void
+interface CellFormat {
+  bold?: boolean
+  italic?: boolean
+  underline?: boolean
+  align?: 'left' | 'center' | 'right'
+  numberFormat?: 'general' | 'currency' | 'percentage' | 'text'
 }
 
-export function SpreadsheetToolbar({ onInsertMetric }: SpreadsheetToolbarProps) {
+interface SpreadsheetToolbarProps {
+  onInsertMetric?: () => void
+  onBold?: () => void
+  onItalic?: () => void
+  onUnderline?: () => void
+  onAlign?: (align: 'left' | 'center' | 'right') => void
+  onNumberFormat?: (format: 'general' | 'currency' | 'percentage' | 'text') => void
+  currentFormat?: CellFormat | null
+}
+
+export function SpreadsheetToolbar({
+  onInsertMetric,
+  onBold,
+  onItalic,
+  onUnderline,
+  onAlign,
+  onNumberFormat,
+  currentFormat
+}: SpreadsheetToolbarProps) {
   return (
-    <div className="flex h-14 items-center justify-between border-b border-border bg-card px-4">
+    <div className="border-b border-border bg-card">
+      {/* Main Toolbar */}
+      <div className="flex h-14 items-center justify-between px-4">
       {/* Left Section - Branding & Workbook Name */}
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon" asChild className="h-7 w-7">
+            <Link href="/workbooks">
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+          </Button>
           <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary">
             <Table2 className="h-4 w-4 text-primary-foreground" />
           </div>
@@ -106,6 +146,100 @@ export function SpreadsheetToolbar({ onInsertMetric }: SpreadsheetToolbarProps) 
         <Button size="sm" className="gap-2">
           <Save className="h-4 w-4" />
           Save
+        </Button>
+      </div>
+    </div>
+
+      {/* Formatting Toolbar */}
+      <div className="flex h-11 items-center gap-1 border-t border-border px-4">
+        {/* Text Formatting */}
+        <Button
+          variant={currentFormat?.bold ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={onBold}
+        >
+          <Bold className="h-4 w-4" />
+        </Button>
+        <Button
+          variant={currentFormat?.italic ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={onItalic}
+        >
+          <Italic className="h-4 w-4" />
+        </Button>
+        <Button
+          variant={currentFormat?.underline ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={onUnderline}
+        >
+          <Underline className="h-4 w-4" />
+        </Button>
+
+        <div className="mx-1 h-6 w-px bg-border" />
+
+        {/* Alignment */}
+        <Button
+          variant={currentFormat?.align === 'left' ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={() => onAlign?.('left')}
+        >
+          <AlignLeft className="h-4 w-4" />
+        </Button>
+        <Button
+          variant={currentFormat?.align === 'center' ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={() => onAlign?.('center')}
+        >
+          <AlignCenter className="h-4 w-4" />
+        </Button>
+        <Button
+          variant={currentFormat?.align === 'right' ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={() => onAlign?.('right')}
+        >
+          <AlignRight className="h-4 w-4" />
+        </Button>
+
+        <div className="mx-1 h-6 w-px bg-border" />
+
+        {/* Number Formatting */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="sm" className="h-8 gap-1.5">
+              <Hash className="h-4 w-4" />
+              <span className="text-xs">Number</span>
+              <ChevronDown className="h-3 w-3" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuItem onClick={() => onNumberFormat?.('general')}>
+              <Hash className="mr-2 h-4 w-4" />
+              Number
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onNumberFormat?.('currency')}>
+              <DollarSign className="mr-2 h-4 w-4" />
+              Currency
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onNumberFormat?.('percentage')}>
+              <Percent className="mr-2 h-4 w-4" />
+              Percentage
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => onNumberFormat?.('text')}>Plain Text</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => onNumberFormat?.('currency')}>
+          <DollarSign className="h-4 w-4" />
+        </Button>
+        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => onNumberFormat?.('percentage')}>
+          <Percent className="h-4 w-4" />
         </Button>
       </div>
     </div>
