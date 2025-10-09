@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect, useMemo, type RefObject } from "react"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -10,6 +10,7 @@ import { Search, Database, Calendar, Filter, ChevronRight, Check, AlertCircle, C
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { detectTimeContext, describeTimeContext, getTimeContextCount, findClosestDateRange, type DetectedTimeContext, type DateGrain, type DetectedDateRange } from "@/lib/date-detection"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import type { SpreadsheetGridHandle, MetricRangeConfig } from "./spreadsheet-grid"
 
 interface CellData {
   raw: string
@@ -28,17 +29,36 @@ interface InsertMetricDialogProps {
   gridData?: CellData[][]
   activeCell?: { row: number; col: number }
   detectedRanges?: DetectedDateRange[]
+  gridRef?: RefObject<SpreadsheetGridHandle>
+  editingRange?: MetricRangeConfig | null
+  onClearEditingRange?: () => void
 }
 
-// Sample models data
+// Mock metrics surfaced in the insert dialog. These mimic the definitions in lib/models/registry.ts.
 const SAMPLE_MODELS = [
   {
-    id: "revenue",
-    name: "Revenue",
-    description: "Total revenue by product and region",
+    id: "new_users",
+    name: "New Users",
+    description: "Count of new user registrations in the selected period",
+    dimensions: ["region", "channel", "plan_type"],
+    granularity: ["month", "quarter", "year"],
+    lastRefresh: "Mock data • just now",
+  },
+  {
+    id: "active_users",
+    name: "Active Users",
+    description: "Distinct active users (status = active) over time",
+    dimensions: ["region", "channel", "plan_type"],
+    granularity: ["month", "quarter", "year"],
+    lastRefresh: "Mock data • just now",
+  },
+  {
+    id: "total_revenue",
+    name: "Total Revenue",
+    description: "Sum of revenue transactions for the selected period",
     dimensions: ["product", "region", "channel"],
     granularity: ["month", "quarter", "year"],
-    lastRefresh: "2 hours ago",
+    lastRefresh: "Mock data • just now",
   },
   {
     id: "expenses",
@@ -78,6 +98,28 @@ const DIMENSION_VALUES = {
   plan_type: ["Annual", "Monthly"],
 }
 
+const DIMENSION_FILTER_MAP: Record<string, Record<string, string | string[]>> = {
+  region: {
+    "North America": ["US", "Canada"],
+    "EMEA": ["UK", "Germany", "France"],
+    "APAC": ["Japan", "Australia"],
+    "LATAM": ["Brazil", "Mexico"],
+  },
+  channel: {
+    Direct: "direct",
+    Partner: "partner",
+    Online: "online",
+  },
+}
+
+const DIMENSION_COLUMN_MAP: Record<string, string> = {
+  region: "country",
+  channel: "channel",
+  department: "department",
+  status: "status",
+  plan_type: "user_type",
+}
+
 type DimensionMode = "select" | "total" | "pivot"
 
 interface DimensionConfig {
@@ -85,11 +127,26 @@ interface DimensionConfig {
   values: string[]
 }
 
-export function InsertMetricDialog({ open, onOpenChange, gridData, activeCell, detectedRanges = [] }: InsertMetricDialogProps) {
+export function InsertMetricDialog({
+  open,
+  onOpenChange,
+  gridData,
+  activeCell,
+  detectedRanges = [],
+  gridRef,
+  editingRange = null,
+  onClearEditingRange,
+}: InsertMetricDialogProps) {
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [dimensionConfigs, setDimensionConfigs] = useState<Record<string, DimensionConfig>>({})
   const [selectedPeriod, setSelectedPeriod] = useState("month")
+  const isEditing = editingRange !== null
+
+  const closeDialog = () => {
+    onOpenChange(false)
+    onClearEditingRange?.()
+  }
 
   // Time context detection state
   const [detectedContext, setDetectedContext] = useState<DetectedTimeContext | null>(null)
@@ -99,10 +156,12 @@ export function InsertMetricDialog({ open, onOpenChange, gridData, activeCell, d
   const [isEditingTimeContext, setIsEditingTimeContext] = useState(false)
 
   // Detect time context from grid headers using context-aware detection
+  const detectionRow = editingRange ? editingRange.rows[0]?.row : activeCell?.row
+
   const autoDetectedContext = useMemo(() => {
     // If we have detected ranges, use the closest one to the active cell
-    if (detectedRanges.length > 0 && activeCell) {
-      const closestRange = findClosestDateRange(detectedRanges, activeCell.row)
+    if (detectedRanges.length > 0 && detectionRow !== undefined) {
+      const closestRange = findClosestDateRange(detectedRanges, detectionRow)
       return closestRange?.context || null
     }
 
@@ -111,7 +170,7 @@ export function InsertMetricDialog({ open, onOpenChange, gridData, activeCell, d
     const headerRow = gridData[0] || []
     const headers = headerRow.map(cell => cell.raw || "")
     return detectTimeContext(headers, 1)
-  }, [detectedRanges, activeCell, gridData])
+  }, [detectedRanges, detectionRow, gridData])
 
   // Update detected context when auto-detection changes
   useEffect(() => {
@@ -122,6 +181,26 @@ export function InsertMetricDialog({ open, onOpenChange, gridData, activeCell, d
       setCustomEndPeriod(autoDetectedContext.endPeriod)
     }
   }, [autoDetectedContext])
+
+  useEffect(() => {
+    if (editingRange) {
+      setSelectedModel(editingRange.metricId)
+      if (editingRange.metadata?.dimensionConfigs) {
+        setDimensionConfigs(editingRange.metadata.dimensionConfigs as Record<string, DimensionConfig>)
+      }
+      if (editingRange.metadata?.selectedPeriod && typeof editingRange.metadata.selectedPeriod === "string") {
+        setSelectedPeriod(editingRange.metadata.selectedPeriod)
+      }
+    } else {
+      setDimensionConfigs({})
+    }
+  }, [editingRange])
+
+  useEffect(() => {
+    if (!open && editingRange) {
+      onClearEditingRange?.()
+    }
+  }, [open, editingRange, onClearEditingRange])
 
   const filteredModels = SAMPLE_MODELS.filter(
     (model) =>
@@ -170,35 +249,96 @@ export function InsertMetricDialog({ open, onOpenChange, gridData, activeCell, d
   }
 
   const handleInsert = () => {
-    // This would insert the metric formula into the active cell
-    console.log("[v0] Inserting metric:", {
-      model: selectedModel,
-      dimensions: dimensionConfigs,
-      period: selectedPeriod,
-    })
-    onOpenChange(false)
+    if (!currentModel || !gridRef?.current) {
+      console.warn("Cannot insert metric: missing required data")
+      return
+    }
+
+    // Generate the formula
+    const formula = `=METRIC("${currentModel.id}")`
+
+    // Determine which columns to populate based on detected date ranges
+    const targetRow = editingRange ? editingRange.rows[0]?.row ?? activeCell?.row : activeCell?.row
+    if (targetRow === undefined) {
+      console.warn("Cannot insert metric: missing target row")
+      return
+    }
+
+    let columnsToFill: number[] = []
+    if (editingRange) {
+      columnsToFill = editingRange.columns
+    } else if (activeCell) {
+      const applicableRange =
+        detectedRanges.find(
+          (range) =>
+            activeCell.row > range.rowIndex &&
+            activeCell.col >= range.startCol &&
+            activeCell.col <= range.endCol,
+        ) || (detectedRanges.length > 0 ? findClosestDateRange(detectedRanges, activeCell.row) : null)
+
+      columnsToFill =
+        applicableRange !== null
+          ? Array.from({ length: applicableRange.endCol - applicableRange.startCol + 1 }, (_, idx) => applicableRange.startCol + idx)
+          : [activeCell.col]
+    }
+
+    if (columnsToFill.length === 0 && activeCell) {
+      columnsToFill = [activeCell.col]
+    }
+
+    const pivotEntry = Object.entries(dimensionConfigs).find(([, config]) => config.mode === "pivot")
+    let rows: MetricRangeConfig["rows"] = []
+
+    if (pivotEntry) {
+      const [dimension, config] = pivotEntry
+      const availableValues = (config.values.length > 0 ? config.values : DIMENSION_VALUES[dimension as keyof typeof DIMENSION_VALUES]) || []
+
+      if (availableValues.length === 0) {
+        rows = [{ row: targetRow, formula }]
+      } else {
+      rows = availableValues.map((value, index) => {
+        const rowIndex = targetRow + index
+        const mappedValue = DIMENSION_FILTER_MAP[dimension]?.[value] ?? value
+        const filterKey = DIMENSION_COLUMN_MAP[dimension] ?? dimension
+        const filters = { [filterKey]: mappedValue }
+        const formulaWithFilters = `=METRIC("${currentModel.id}", ${JSON.stringify(filters)})`
+        return {
+          row: rowIndex,
+          formula: formulaWithFilters,
+          label: value,
+          }
+        })
+      }
+    } else {
+      rows = [{ row: targetRow, formula }]
+    }
+
+    const dimensionConfigSnapshot = JSON.parse(JSON.stringify(dimensionConfigs)) as Record<string, DimensionConfig>
+
+    const rangeConfig: MetricRangeConfig = {
+      id: editingRange?.id ?? `metric_${Date.now()}`,
+      metricId: currentModel.id,
+      columns: columnsToFill,
+      rows,
+      displayName: currentModel.name,
+      metadata: {
+        dimensionConfigs: dimensionConfigSnapshot,
+        selectedPeriod,
+      },
+    }
+
+    gridRef.current.applyMetricRange(rangeConfig)
+
+    // Close the dialog
+    closeDialog()
   }
 
   const generatePreviewFormula = () => {
     if (!currentModel) return ""
 
-    const dimensionParams: string[] = []
-    currentModel.dimensions.forEach((dim) => {
-      const config = dimensionConfigs[dim]
-
-      if (config) {
-        if (config.mode === "total") {
-          dimensionParams.push(`"${dim}": "ALL"`)
-        } else if (config.mode === "pivot") {
-          dimensionParams.push(`"${dim}": "PIVOT"`)
-        } else if (config.values.length > 0) {
-          dimensionParams.push(`"${dim}": [${config.values.map((v) => `"${v}"`).join(", ")}]`)
-        }
-      }
-    })
-
-    const paramsStr = dimensionParams.length > 0 ? `, {${dimensionParams.join(", ")}}` : ""
-    return `=METRICRANGE("${currentModel.id}", A2:A13${paramsStr})`
+    // For now, we'll use the simple METRIC() syntax
+    // In the future, we can add dimension filtering support
+    return `=METRIC("${currentModel.id}")`
   }
 
   const handleApplyTimeContextChanges = () => {
@@ -549,11 +689,11 @@ export function InsertMetricDialog({ open, onOpenChange, gridData, activeCell, d
               : "No model selected"}
           </p>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
+            <Button variant="outline" onClick={closeDialog}>
               Cancel
             </Button>
             <Button onClick={handleInsert} disabled={!currentModel} className="gap-2">
-              Insert Metric
+              {isEditing ? "Update Metric" : "Insert Metric"}
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>

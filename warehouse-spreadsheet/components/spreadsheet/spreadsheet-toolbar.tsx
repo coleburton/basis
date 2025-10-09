@@ -25,6 +25,7 @@ import {
   Percent,
   DollarSign,
   Hash,
+  Calendar,
 } from "lucide-react"
 import Link from "next/link"
 import {
@@ -41,8 +42,10 @@ interface CellFormat {
   italic?: boolean
   underline?: boolean
   align?: 'left' | 'center' | 'right'
-  numberFormat?: 'general' | 'currency' | 'percentage' | 'text'
+  numberFormat?: 'general' | 'currency' | 'percentage' | 'text' | 'date'
 }
+
+type NumberFormatOption = NonNullable<CellFormat['numberFormat']>
 
 interface SpreadsheetToolbarProps {
   onInsertMetric?: () => void
@@ -50,7 +53,7 @@ interface SpreadsheetToolbarProps {
   onItalic?: () => void
   onUnderline?: () => void
   onAlign?: (align: 'left' | 'center' | 'right') => void
-  onNumberFormat?: (format: 'general' | 'currency' | 'percentage' | 'text') => void
+  onNumberFormat?: (format: 'general' | 'currency' | 'percentage' | 'text' | 'date') => void
   currentFormat?: CellFormat | null
 }
 
@@ -63,6 +66,15 @@ export function SpreadsheetToolbar({
   onNumberFormat,
   currentFormat
 }: SpreadsheetToolbarProps) {
+  const numberFormat = currentFormat?.numberFormat ?? 'general'
+  const numberFormatLabels: Record<NumberFormatOption, string> = {
+    general: 'Number',
+    currency: 'Currency',
+    percentage: 'Percentage',
+    text: 'Plain Text',
+    date: 'Date',
+  }
+
   return (
     <div className="border-b border-border bg-card">
       {/* Main Toolbar */}
@@ -213,7 +225,9 @@ export function SpreadsheetToolbar({
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="sm" className="h-8 gap-1.5">
               <Hash className="h-4 w-4" />
-              <span className="text-xs">Number</span>
+              <span className="text-xs inline-block w-16 text-left">
+                {numberFormatLabels[numberFormat]}
+              </span>
               <ChevronDown className="h-3 w-3" />
             </Button>
           </DropdownMenuTrigger>
@@ -230,16 +244,38 @@ export function SpreadsheetToolbar({
               <Percent className="mr-2 h-4 w-4" />
               Percentage
             </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onNumberFormat?.('date')}>
+              <Calendar className="mr-2 h-4 w-4" />
+              Date
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => onNumberFormat?.('text')}>Plain Text</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => onNumberFormat?.('currency')}>
+        <Button
+          variant={numberFormat === 'currency' ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={() => onNumberFormat?.('currency')}
+        >
           <DollarSign className="h-4 w-4" />
         </Button>
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => onNumberFormat?.('percentage')}>
+        <Button
+          variant={numberFormat === 'percentage' ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={() => onNumberFormat?.('percentage')}
+        >
           <Percent className="h-4 w-4" />
+        </Button>
+        <Button
+          variant={numberFormat === 'date' ? "default" : "ghost"}
+          size="icon"
+          className="h-8 w-8"
+          onClick={() => onNumberFormat?.('date')}
+        >
+          <Calendar className="h-4 w-4" />
         </Button>
       </div>
     </div>

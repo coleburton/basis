@@ -230,6 +230,33 @@ export function parseDateLabel(label: string): DatePeriod | null {
          null
 }
 
+function normalizePeriods(periods: DatePeriod[]): DatePeriod[] {
+  if (periods.length === 0) return periods
+
+  const allDayWithStart = periods.every(
+    (period) => period.grain === 'day' && period.startDate instanceof Date,
+  )
+
+  if (allDayWithStart) {
+    const allFirstOfMonth = periods.every(
+      (period) => period.startDate!.getDate() === 1,
+    )
+
+    if (allFirstOfMonth) {
+      return periods.map((period) => {
+        const start = period.startDate!
+        return {
+          ...period,
+          grain: 'month',
+          period: start.getMonth() + 1,
+        }
+      })
+    }
+  }
+
+  return periods
+}
+
 /**
  * Detect the time context from a row of column headers
  * @param headers Array of column header labels
@@ -261,29 +288,31 @@ export function detectTimeContext(
     }
   }
 
+  const normalizedPeriods = normalizePeriods(periods)
+
   // Require at least 3 consecutive periods to qualify as a date range
-  if (periods.length < 3) {
+  if (normalizedPeriods.length < 3) {
     return null
   }
 
   // Determine the grain (should be consistent across all periods)
-  const grains = new Set(periods.map(p => p.grain))
+  const grains = new Set(normalizedPeriods.map(p => p.grain))
   if (grains.size > 1) {
     // Mixed grains - lower confidence or pick the most common one
     const grainCounts = Array.from(grains).map(g => ({
       grain: g,
-      count: periods.filter(p => p.grain === g).length
+      count: normalizedPeriods.filter(p => p.grain === g).length
     }))
     grainCounts.sort((a, b) => b.count - a.count)
     const dominantGrain = grainCounts[0].grain
 
     // Filter to only include dominant grain
-    const filteredPeriods = periods.filter(p => p.grain === dominantGrain)
+    const filteredPeriods = normalizedPeriods.filter(p => p.grain === dominantGrain)
 
     return buildTimeContext(filteredPeriods, 'medium')
   }
 
-  return buildTimeContext(periods, 'high')
+  return buildTimeContext(normalizedPeriods, 'high')
 }
 
 /**
@@ -397,14 +426,15 @@ export function detectAllDateRanges(
     }
 
     // Require at least 3 consecutive periods
-    if (periods.length >= 3 && firstDateCol !== -1) {
-      const grain = periods[0].grain
-      const startPeriod = formatPeriod(periods[0])
-      const endPeriod = formatPeriod(periods[periods.length - 1])
+    const normalizedPeriods = normalizePeriods(periods)
+    if (normalizedPeriods.length >= 3 && firstDateCol !== -1) {
+      const grain = normalizedPeriods[0].grain
+      const startPeriod = formatPeriod(normalizedPeriods[0])
+      const endPeriod = formatPeriod(normalizedPeriods[normalizedPeriods.length - 1])
 
       const context: DetectedTimeContext = {
         grain,
-        periods,
+        periods: normalizedPeriods,
         startPeriod,
         endPeriod,
         confidence: 'high',
