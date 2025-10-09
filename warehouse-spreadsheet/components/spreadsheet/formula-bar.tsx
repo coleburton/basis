@@ -16,6 +16,9 @@ interface FormulaBarProps {
 }
 
 const REFERENCE_COLORS = ["#2563eb", "#dc2626", "#10b981", "#f97316"]
+const SHEET_NAME_PATTERN = `(?:'[^']+'|[A-Za-z0-9_]+)`
+const CELL_REFERENCE_PATTERN = `\\$?[A-Z]+\\$?\\d+(?::\\$?[A-Z]+\\$?\\d+)?`
+const FULL_REFERENCE_REGEX = new RegExp(`(?:${SHEET_NAME_PATTERN}!){0,1}${CELL_REFERENCE_PATTERN}`, "g")
 
 export function FormulaBar({
   activeCell,
@@ -57,13 +60,12 @@ export function FormulaBar({
       return formula
     }
 
-    const pattern = /\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?/g
     const parts: { text: string; color?: string }[] = []
     let lastIndex = 0
     let colorIndex = 0
 
     let match: RegExpExecArray | null
-    while ((match = pattern.exec(formula)) !== null) {
+    while ((match = FULL_REFERENCE_REGEX.exec(formula)) !== null) {
       // Add text before the match
       if (match.index > lastIndex) {
         parts.push({ text: formula.slice(lastIndex, match.index) })

@@ -13,7 +13,7 @@ import {
   type ParsedFormula,
 } from './parser';
 
-export type CellGetter = (row: number, col: number) => string | number | null;
+export type CellGetter = (row: number, col: number, sheetName?: string) => string | number | null;
 
 /**
  * Evaluates a formula and returns the computed value
@@ -120,6 +120,7 @@ function resolveArgument(
 
 /**
  * Resolves a cell or range reference to values
+ * Supports cross-sheet references via sheetName property
  */
 function resolveCellOrRange(
   ref: Reference,
@@ -127,7 +128,7 @@ function resolveCellOrRange(
 ): (string | number | null)[] {
   if (ref.type === 'cell') {
     const { row, col } = cellRefToCoords(ref);
-    return [getCellValue(row, col)];
+    return [getCellValue(row, col, ref.sheetName)];
   }
 
   // It's a range
@@ -138,7 +139,7 @@ function resolveCellOrRange(
 
   for (let row = startCoords.row; row <= endCoords.row; row++) {
     for (let col = startCoords.col; col <= endCoords.col; col++) {
-      values.push(getCellValue(row, col));
+      values.push(getCellValue(row, col, ref.sheetName));
     }
   }
 
@@ -167,13 +168,20 @@ function evaluateExpression(
     for (const ref of sortedRefs) {
       if (ref.type === 'cell') {
         const { row, col } = cellRefToCoords(ref);
-        const value = getCellValue(row, col);
+        const value = getCellValue(row, col, ref.sheetName);
         const numValue = typeof value === 'number' ? value : parseFloat(String(value || '0'));
-        const refString = `${ref.column}${ref.row}`;
+
+        // Build the reference string (with or without sheet name)
+        const refString = ref.sheetName
+          ? `${ref.sheetName}!${ref.column}${ref.row}`
+          : `${ref.column}${ref.row}`;
+
+        // Escape special regex characters in sheet name if present
+        const escapedRefString = refString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
         // Replace all instances of this cell reference
         evalExpression = evalExpression.replace(
-          new RegExp(`\\b${refString}\\b`, 'g'),
+          new RegExp(escapedRefString, 'g'),
           isNaN(numValue) ? '0' : String(numValue)
         );
       }

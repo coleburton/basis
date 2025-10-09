@@ -7,6 +7,7 @@ import {
   KeyboardEvent,
   MouseEvent as ReactMouseEvent,
   ClipboardEvent as ReactClipboardEvent,
+  FocusEvent as ReactFocusEvent,
   useCallback,
   useMemo,
   forwardRef,
@@ -22,50 +23,35 @@ import {
   evaluateMetricFormula,
   type MetricEvaluationResult
 } from "@/lib/formula/metric-evaluator"
+import { 
+  useWorkbook,
+  type MetricRangeConfig,
+  type MetricRangeRowConfig,
+  type MetricCellResult,
+  type CellFormat,
+  type CellContent,
+} from "@/lib/workbook/workbook-context"
 
 interface SpreadsheetGridProps {
   activeCell: { row: number; col: number }
   onCellClick: (cell: { row: number; col: number }) => void
   onCellChange?: (row: number, col: number, value: string) => void
   onFormulaChange?: (formula: string) => void
+  onEditingStateChange?: (state: { isEditing: boolean; isFormula: boolean; sheetId: string | null }) => void
   detectedRanges?: DetectedDateRange[]
   onEditMetricRange?: (config: MetricRangeConfig) => void
 }
 
-interface CellFormat {
-  bold?: boolean
-  italic?: boolean
-  underline?: boolean
-  align?: 'left' | 'center' | 'right'
-  numberFormat?: 'general' | 'currency' | 'percentage' | 'text' | 'date'
-}
-
-interface CellContent {
-  raw: string // The raw value or formula
-  format?: CellFormat
-  metricRangeId?: string | null
-}
-
-export interface MetricRangeRowConfig {
-  row: number
-  formula: string
-  label?: string
-}
-
-export interface MetricRangeConfig {
-  id: string
-  metricId: string
-  columns: number[]
-  rows: MetricRangeRowConfig[]
-  displayName?: string
-  metadata?: Record<string, unknown>
-}
+// Re-export types for backwards compatibility
+export type { MetricRangeRowConfig, MetricRangeConfig }
 
 export interface SpreadsheetGridHandle {
   setFormulaDraft: (value: string, options?: { focusCell?: boolean; source?: 'grid' | 'formulaBar' }) => void
   commitFormulaDraft: (value: string) => void
   cancelFormulaDraft: () => void
   toggleReferenceAnchor: () => void
+  preserveEditOnNextBlur: () => void
+  getEditingContext: () => { isEditing: boolean; sheetId: string | null; isFormula: boolean }
   applyFormatting: (format: Partial<CellFormat>) => void
   getSelectionFormat: () => CellFormat | null
   getGridData: () => CellContent[][]
@@ -135,6 +121,7 @@ interface ReferenceHighlight {
   start: { row: number; col: number }
   end: { row: number; col: number }
   color: string
+  sheetName?: string | null
 }
 
 interface CellRange {
@@ -147,14 +134,47 @@ const DEFAULT_ROW_HEIGHT = 40
 const MIN_COLUMN_WIDTH = 60
 const MIN_ROW_HEIGHT = 24
 
-const extractFormulaHighlights = (formula: string): ReferenceHighlight[] => {
+const SHEET_NAME_PATTERN = `(?:'[^']+'|[A-Za-z0-9_]+)`
+const CELL_TOKEN_PATTERN = `\\$?[A-Z]+\\$?\\d+(?::\\$?[A-Z]+\\$?\\d+)?`
+const FULL_REFERENCE_PATTERN = new RegExp(`(?:${SHEET_NAME_PATTERN}!){0,1}${CELL_TOKEN_PATTERN}`, "gi")
+
+const splitReferenceToken = (token: string) => {
+  if (!token.includes("!")) {
+    return { sheetToken: null as string | null, cellToken: token }
+  }
+  const [rawSheet, cellToken] = token.split("!")
+  return { sheetToken: rawSheet ?? null, cellToken }
+}
+
+const normalizeSheetToken = (sheetToken: string | null) => {
+  if (!sheetToken) return null
+  if (sheetToken.startsWith("'") && sheetToken.endsWith("'")) {
+    const inner = sheetToken.slice(1, -1)
+    return inner.replace(/''/g, "'")
+  }
+  return sheetToken
+}
+
+const needsSheetQuotes = (name: string) => /[\s'!]/.test(name)
+
+const formatSheetPrefix = (name: string | null | undefined) => {
+  if (!name) return ""
+  const escaped = name.replace(/'/g, "''")
+  return needsSheetQuotes(name) ? `'${escaped}'!` : `${name}!`
+}
+
+const extractFormulaHighlights = (formula: string, visibleSheetName: string | null): ReferenceHighlight[] => {
   if (!formula.startsWith("=")) return []
-  const pattern = /\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?/gi
-  const matches = formula.match(pattern) || []
+  const matches = formula.match(FULL_REFERENCE_PATTERN) || []
   const highlights: ReferenceHighlight[] = []
 
   matches.forEach((token, idx) => {
-    const [startRef, endRef] = token.split(":")
+    const { sheetToken, cellToken } = splitReferenceToken(token)
+    const normalizedSheet = normalizeSheetToken(sheetToken)
+    if (normalizedSheet && visibleSheetName && normalizedSheet !== visibleSheetName) {
+      return
+    }
+    const [startRef, endRef] = cellToken.split(":")
     const startCoords = cellRefToCoords(startRef)
     const endCoords = endRef ? cellRefToCoords(endRef) : startCoords
     if (!startCoords || !endCoords) return
@@ -169,6 +189,7 @@ const extractFormulaHighlights = (formula: string): ReferenceHighlight[] => {
         col: Math.max(startCoords.col, endCoords.col),
       },
       color: REFERENCE_COLORS[idx % REFERENCE_COLORS.length],
+      sheetName: normalizedSheet,
     })
   })
 
@@ -244,7 +265,7 @@ const cycleReferenceInFormula = (
   selectionEnd: number,
 ) => {
   const caret = Math.min(selectionStart, selectionEnd)
-  const pattern = /\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?/g
+  const pattern = FULL_REFERENCE_PATTERN
   let match: RegExpExecArray | null
 
   while ((match = pattern.exec(formula)) !== null) {
@@ -260,7 +281,10 @@ const cycleReferenceInFormula = (
       }
     }
 
-    const cycled = cycleReferenceToken(match[0])
+    const token = match[0]
+    const { sheetToken, cellToken } = splitReferenceToken(token)
+    const cycledCell = cycleReferenceToken(cellToken)
+    const cycled = cycledCell ? `${sheetToken ? `${sheetToken}!` : ""}${cycledCell}` : null
     if (!cycled) return null
 
     const before = formula.slice(0, startIdx)
@@ -285,9 +309,9 @@ export const adjustFormulaReferences = (
     return formula
   }
 
-  const pattern = /\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?/g
-  return formula.replace(pattern, (token) => {
-    const [startRef, endRef] = token.split(":")
+  return formula.replace(FULL_REFERENCE_PATTERN, (token) => {
+    const { sheetToken, cellToken } = splitReferenceToken(token)
+    const [startRef, endRef] = cellToken.split(":")
     const parsedStart = parseCellReference(startRef)
     if (!parsedStart) return token
 
@@ -318,7 +342,7 @@ export const adjustFormulaReferences = (
     )
 
     if (!endRef) {
-      return adjustedStart
+      return sheetToken ? `${sheetToken}!${adjustedStart}` : adjustedStart
     }
 
     const parsedEnd = parseCellReference(endRef)
@@ -331,7 +355,8 @@ export const adjustFormulaReferences = (
       parsedEnd.rowAnchored,
     )
 
-    return `${adjustedStart}:${adjustedEnd}`
+    const adjustedRange = `${adjustedStart}:${adjustedEnd}`
+    return sheetToken ? `${sheetToken}!${adjustedRange}` : adjustedRange
   })
 }
 
@@ -508,13 +533,62 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   onCellClick,
   onCellChange,
   onFormulaChange,
+  onEditingStateChange,
   detectedRanges = [],
   onEditMetricRange,
 }: SpreadsheetGridProps, ref) {
   const initialGrid = useMemo(() => createInitialGridData(), [])
-  const [gridData, setGridData] = useState<CellContent[][]>(initialGrid)
+
+  // Use workbook context for multi-sheet support
+  const { sheets, activeSheet, updateSheetData, updateSheetMetricRanges, updateSheetMetricCells, setActiveSheet, getSheet } = useWorkbook()
+  const gridData = activeSheet?.gridData ?? initialGrid
+  const metricRanges = activeSheet?.metricRanges ?? {}
+  const sheetMetricCells = activeSheet?.metricCells ?? {}
+  const latestGridDataRef = useRef<CellContent[][]>(gridData)
+  const pendingSheetUpdatesRef = useRef<Map<string, CellContent[][]>>(new Map())
+  const hyperFormulaSheetIdMapRef = useRef<Map<string, number>>(new Map())
+
+  useEffect(() => {
+    latestGridDataRef.current = gridData
+    if (activeSheet) {
+      pendingSheetUpdatesRef.current.set(activeSheet.id, gridData)
+    }
+  }, [gridData])
+
+  // Wrapper to sync grid data changes to workbook context while supporting batched updates
+  const setGridData = useCallback((updater: CellContent[][] | ((prev: CellContent[][]) => CellContent[][])) => {
+    if (!activeSheet) return
+    const baseData = latestGridDataRef.current
+    const newData = typeof updater === 'function' ? updater(baseData) : updater
+    latestGridDataRef.current = newData
+    updateSheetData(activeSheet.id, newData)
+  }, [activeSheet, updateSheetData])
+
   const hyperFormulaRef = useRef<HyperFormula | null>(null)
   const sheetIdRef = useRef<number>(0)
+  useEffect(() => {
+    if (activeSheet) {
+      const hfSheetId = hyperFormulaSheetIdMapRef.current.get(activeSheet.id)
+      if (typeof hfSheetId === "number") {
+        sheetIdRef.current = hfSheetId
+      }
+    }
+  }, [activeSheet])
+  const getHyperFormulaSheetId = useCallback((sheetId?: string | null) => {
+    if (sheetId) {
+      const mapped = hyperFormulaSheetIdMapRef.current.get(sheetId)
+      if (typeof mapped === "number") {
+        return mapped
+      }
+    }
+    if (activeSheet) {
+      const activeMapped = hyperFormulaSheetIdMapRef.current.get(activeSheet.id)
+      if (typeof activeMapped === "number") {
+        return activeMapped
+      }
+    }
+    return sheetIdRef.current
+  }, [activeSheet])
   const cellRefs = useRef<HTMLDivElement[][]>([])
   const [columnWidths, setColumnWidths] = useState<number[]>(() => Array(columns.length).fill(DEFAULT_COLUMN_WIDTH))
   const [rowHeights, setRowHeights] = useState<number[]>(() => Array(NUM_ROWS).fill(DEFAULT_ROW_HEIGHT))
@@ -560,27 +634,62 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   const [referencePreview, setReferencePreview] = useState<{
     start: { row: number; col: number }
     end: { row: number; col: number }
+    sheetId?: string | null
   } | null>(null)
   const pendingReferenceRef = useRef<{
     startIndex: number
     endIndex: number
     anchor: { row: number; col: number }
+    sheetId: string | null
+    sheetName: string | null
+    includeSheetPrefix: boolean
   } | null>(null)
   const referenceSelectionActiveRef = useRef(false)
-  const keyboardReferenceCursorRef = useRef<{ row: number; col: number } | null>(null)
+  const keyboardReferenceCursorRef = useRef<{ row: number; col: number; sheetId: string | null } | null>(null)
+  const preserveEditOnBlurRef = useRef(false)
+  const editingSheetIdRef = useRef<string | null>(null)
 
-  // Metric cell evaluation state
-  const [metricCells, setMetricCells] = useState<Record<string, MetricEvaluationResult>>({})
+  // Metric cell evaluation state - synced with sheet
+  const [metricCells, setMetricCells] = useState<Record<string, MetricEvaluationResult>>(() => sheetMetricCells)
   const metricEvaluationInProgressRef = useRef<Set<string>>(new Set())
-  const [metricRanges, setMetricRanges] = useState<Record<string, MetricRangeConfig>>({})
   const [hoveredMetricRangeId, setHoveredMetricRangeId] = useState<string | null>(null)
+  const lastSyncedMetricCellsRef = useRef<Record<string, MetricEvaluationResult>>(sheetMetricCells)
+  
+  // Load metricCells from sheet when switching sheets
+  useEffect(() => {
+    setMetricCells(sheetMetricCells)
+    lastSyncedMetricCellsRef.current = sheetMetricCells
+  }, [activeSheet?.id])
+
+  // Sync metricCells to sheet when they actually change (debounced to avoid loops)
+  useEffect(() => {
+    if (!activeSheet) return
+    
+    // Only sync if metricCells actually changed (not just a re-render)
+    const hasChanged = JSON.stringify(metricCells) !== JSON.stringify(lastSyncedMetricCellsRef.current)
+    
+    if (hasChanged) {
+      const timeoutId = setTimeout(() => {
+        updateSheetMetricCells(activeSheet.id, metricCells)
+        lastSyncedMetricCellsRef.current = metricCells
+      }, 100) // Small debounce to batch updates
+      
+      return () => clearTimeout(timeoutId)
+    }
+  }, [metricCells, activeSheet, updateSheetMetricCells])
   const editingSourceRef = useRef<'grid' | 'formulaBar' | null>(null)
+  const previousEditingStateRef = useRef<{ isEditing: boolean; sheetId: string | null; isFormula: boolean }>({
+    isEditing: false,
+    sheetId: null,
+    isFormula: false,
+  })
   const updateEngineMetricValue = useCallback(
     (row: number, col: number, result: MetricEvaluationResult | { value: number | string | null; error: string | null }) => {
       const hf = hyperFormulaRef.current
       if (!hf) return
 
-      const address: SimpleCellAddress = { sheet: sheetIdRef.current, row, col }
+      const sheetId = getHyperFormulaSheetId(activeSheet?.id)
+      const address: SimpleCellAddress = { sheet: sheetId, row, col }
 
       try {
         if ('error' in result && result.error) {
@@ -600,8 +709,25 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         console.error(`Failed to sync metric value with engine at [${row}, ${col}]`, error)
       }
     },
-    []
+    [activeSheet?.id, getHyperFormulaSheetId]
   )
+
+  // Sync cached metric values to HyperFormula when sheet switches
+  useEffect(() => {
+    if (!activeSheet || !hyperFormulaRef.current) return
+
+    // Sync all cached metric cell values to HyperFormula so formulas can reference them
+    Object.entries(sheetMetricCells).forEach(([cellKey, result]) => {
+      if (!result.error && result.value !== null) {
+        const [rowStr, colStr] = cellKey.split(',')
+        const row = parseInt(rowStr, 10)
+        const col = parseInt(colStr, 10)
+        if (!isNaN(row) && !isNaN(col)) {
+          updateEngineMetricValue(row, col, result)
+        }
+      }
+    })
+  }, [activeSheet?.id, sheetMetricCells, updateEngineMetricValue])
 
   const numberFormatter = useMemo(() => {
     return new Intl.NumberFormat("en-US", {
@@ -632,18 +758,21 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     if (!editingCell) return []
     const currentValue = editValue
     if (!currentValue.startsWith("=")) return []
-    return extractFormulaHighlights(currentValue)
-  }, [editValue, editingCell])
+    return extractFormulaHighlights(currentValue, activeSheet?.name ?? null)
+  }, [activeSheet?.name, editValue, editingCell])
 
   const previewHighlight = useMemo<ReferenceHighlight | null>(() => {
     if (!referencePreview) return null
+    if (referencePreview.sheetId && activeSheet && referencePreview.sheetId !== activeSheet.id) {
+      return null
+    }
     const color = REFERENCE_COLORS[referenceHighlights.length % REFERENCE_COLORS.length]
     return {
       start: referencePreview.start,
       end: referencePreview.end,
       color,
     }
-  }, [referenceHighlights.length, referencePreview])
+  }, [activeSheet, referenceHighlights.length, referencePreview])
 
   const applySelection = useCallback((ranges: CellRange[], anchor?: { row: number; col: number }) => {
     if (anchor) {
@@ -783,13 +912,35 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     [handleRowResizeEnd, handleRowResizeMove, rowHeights]
   )
 
+  // Initialize HyperFormula when workbook sheets change
   useEffect(() => {
-    const sheetData = initialGrid.map(row => row.map(cell => normalizeValueForEngine(cell.raw, cell.format)))
-    const hf = HyperFormula.buildFromArray(sheetData, { licenseKey: "gpl-v3" })
+    if (!activeSheet || sheets.length === 0) return
 
+    const sheetsPayload: Record<string, (string | number | null)[][]> = {}
+    sheets.forEach(sheet => {
+      sheetsPayload[sheet.name] = sheet.gridData.map(row =>
+        row.map(cell => normalizeValueForEngine(cell.raw, cell.format))
+      )
+    })
+
+    if (hyperFormulaRef.current) {
+      hyperFormulaRef.current.destroy()
+    }
+
+    const hf = HyperFormula.buildFromSheets(sheetsPayload, { licenseKey: "gpl-v3" })
     hyperFormulaRef.current = hf
-    const [firstSheet] = hf.getSheetNames()
-    sheetIdRef.current = firstSheet ? hf.getSheetId(firstSheet) ?? 0 : 0
+
+    const sheetIdMap = new Map<string, number>()
+    sheets.forEach(sheet => {
+      const hfSheetId = hf.getSheetId(sheet.name)
+      if (typeof hfSheetId === "number") {
+        sheetIdMap.set(sheet.id, hfSheetId)
+      }
+    })
+    hyperFormulaSheetIdMapRef.current = sheetIdMap
+    const activeHfSheetId = sheetIdMap.get(activeSheet.id) ?? 0
+    sheetIdRef.current = activeHfSheetId
+
     const availableFunctions = hf.getRegisteredFunctionNames().sort()
     setFunctionNames(availableFunctions)
 
@@ -797,7 +948,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       hf.destroy()
       hyperFormulaRef.current = null
     }
-  }, [initialGrid])
+  }, [activeSheet, sheets])
 
   useEffect(() => {
     if (suppressSelectionSyncRef.current) {
@@ -859,7 +1010,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       const hf = hyperFormulaRef.current
       if (!hf) return null
 
-      const address: SimpleCellAddress = { sheet: sheetIdRef.current, row, col }
+      const sheetId = getHyperFormulaSheetId(activeSheet?.id)
+      const address: SimpleCellAddress = { sheet: sheetId, row, col }
       try {
         return hf.getCellValue(address)
       } catch (error) {
@@ -867,7 +1019,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         return null
       }
     },
-    []
+    [activeSheet?.id, getHyperFormulaSheetId]
   )
 
   const formatComputedValue = useCallback(
@@ -950,12 +1102,11 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     // Mark as in progress
     metricEvaluationInProgressRef.current.add(cellKey)
 
-    // Set loading state
+    // Set loading state (preserve previous value in engine during loading)
     setMetricCells(prev => ({
       ...prev,
-      [cellKey]: { value: null, loading: true, error: null }
+      [cellKey]: { value: prev[cellKey]?.value ?? null, loading: true, error: null }
     }))
-    updateEngineMetricValue(row, col, { value: null, error: null })
 
     try {
       // Evaluate the metric formula
@@ -966,7 +1117,10 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         ...prev,
         [cellKey]: result
       }))
-      updateEngineMetricValue(row, col, result)
+      // Only update engine with successful results
+      if (!result.error) {
+        updateEngineMetricValue(row, col, result)
+      }
     } catch (error) {
       console.error(`Error evaluating metric at [${row}, ${col}]:`, error)
       setMetricCells(prev => ({
@@ -977,36 +1131,87 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
           error: error instanceof Error ? error.message : 'Unknown error'
         }
       }))
-      updateEngineMetricValue(row, col, { value: null, error: error instanceof Error ? error.message : 'Unknown error' })
+      // Don't update engine with error - preserve previous value
     } finally {
       // Remove from in-progress set
       metricEvaluationInProgressRef.current.delete(cellKey)
     }
   }, [detectedRanges, updateEngineMetricValue])
 
-  // Evaluate METRIC formulas when grid data or detected ranges change
-  useEffect(() => {
-    // Scan grid for METRIC formulas
-    gridData.forEach((row, rowIdx) => {
-      row.forEach((cell, colIdx) => {
-        const formula = cell.raw
-        if (isMetricFormula(formula)) {
-          // Evaluate this metric cell
-          void evaluateMetricCell(rowIdx, colIdx, formula)
-        }
-      })
-    })
-  }, [gridData, evaluateMetricCell])
+  // Cleanup orphaned metric ranges (ranges with no cells referencing them)
+  const cleanupOrphanedMetricRanges = useCallback(() => {
+    if (!activeSheet) return
+    
+    const currentGrid = latestGridDataRef.current ?? []
+    const prev = metricRanges
+    const referencedRangeIds = new Set<string>()
 
-  const updateCellValue = useCallback((row: number, col: number, value: string, options: { skipUndo?: boolean; metricRangeId?: string | null } = {}) => {
+    for (const row of currentGrid) {
+      for (const cell of row) {
+        if (cell?.metricRangeId) {
+          referencedRangeIds.add(cell.metricRangeId)
+        }
+      }
+    }
+
+    const cleanedRanges: Record<string, MetricRangeConfig> = {}
+    let hasChanges = false
+    for (const [id, config] of Object.entries(prev)) {
+      if (referencedRangeIds.has(id)) {
+        cleanedRanges[id] = config
+      } else {
+        hasChanges = true
+      }
+    }
+
+    if (hasChanges) {
+      updateSheetMetricRanges(activeSheet.id, cleanedRanges)
+    }
+  }, [activeSheet, metricRanges, updateSheetMetricRanges])
+
+  const updateCellValue = useCallback((
+    row: number,
+    col: number,
+    value: string,
+    options: { skipUndo?: boolean; metricRangeId?: string | null } = {},
+    overrides: { sheetId?: string | null } = {}
+  ) => {
     const { skipUndo = false, metricRangeId } = options
     const autoValue = autoCloseFormula(value)
-    const hf = hyperFormulaRef.current
-    const address: SimpleCellAddress = { sheet: sheetIdRef.current, row, col }
+    const trimmedAutoValue = autoValue.trim()
+    const targetSheetId = overrides.sheetId ?? editingSheetIdRef.current ?? activeSheet?.id ?? null
+    if (!targetSheetId) return
 
-    const currentCell = gridData[row]?.[col]
+    const targetSheet = targetSheetId === activeSheet?.id
+      ? activeSheet
+      : getSheet(targetSheetId)
+    if (!targetSheet) return
+
+    const hf = hyperFormulaRef.current
+    const hfSheetId = getHyperFormulaSheetId(targetSheetId)
+    const address: SimpleCellAddress = { sheet: hfSheetId, row, col }
+
+    const currentGrid =
+      targetSheetId === activeSheet?.id
+        ? latestGridDataRef.current ?? targetSheet.gridData
+        : pendingSheetUpdatesRef.current.get(targetSheetId) ?? targetSheet.gridData
+    const baseGrid = currentGrid ?? []
+    const newData = baseGrid.map(rowArr =>
+      rowArr ? rowArr.map(cell => ({ ...cell })) : Array.from({ length: columns.length }, () => ({ raw: "" }))
+    )
+
+    if (!newData[row]) {
+      newData[row] = Array.from({ length: columns.length }, () => ({ raw: "" }))
+    }
+
+    const currentCell = newData[row]?.[col]
     const currentFormat = currentCell?.format
     const normalized = normalizeValueForEngine(autoValue, currentFormat)
+    let cleanupNeeded = false
+
+    if (process.env.NODE_ENV !== "production") {
+      console.debug("[grid] updateCellValue", { row, col, value: autoValue, metricRangeId, targetSheetId })
+    }
 
     if (hf) {
       try {
@@ -1016,53 +1221,93 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       }
     }
 
-    setGridData(prevData => {
-      const prevCell = prevData[row]?.[col]
-      const oldValue = prevCell?.raw ?? ""
-      const oldMetricRangeId = prevCell?.metricRangeId ?? null
-      const newMetricRangeId = metricRangeId !== undefined ? metricRangeId : oldMetricRangeId
+    const prevCell = currentCell
+    const oldValue = prevCell?.raw ?? ""
+    const oldMetricRangeId = prevCell?.metricRangeId ?? null
+    let nextMetricRangeId: string | null | undefined
 
-      if (!skipUndo && oldValue !== autoValue) {
-        setUndoStack(prev => [...prev, {
-          type: 'cell-change',
-          changes: [{
-            row,
-            col,
-            oldValue,
-            newValue: autoValue,
-            oldMetricRangeId,
-            newMetricRangeId,
-          }]
-        }])
-        setRedoStack([])
-      }
+    if (metricRangeId !== undefined) {
+      nextMetricRangeId = metricRangeId
+    } else if (trimmedAutoValue === "") {
+      nextMetricRangeId = null
+    } else {
+      nextMetricRangeId = oldMetricRangeId
+    }
 
-      const newData = prevData.map(rowArr => [...rowArr])
-      if (!newData[row]) {
-        newData[row] = Array.from({ length: columns.length }, () => ({ raw: "" }))
-      }
+    if (!skipUndo && oldValue !== autoValue) {
+      setUndoStack(prev => [...prev, {
+        type: 'cell-change',
+        changes: [{
+          row,
+          col,
+          oldValue,
+          newValue: autoValue,
+          oldMetricRangeId,
+          newMetricRangeId: nextMetricRangeId ?? null,
+        }]
+      }])
+      setRedoStack([])
+    }
 
-      const existingCell = newData[row][col] || { raw: "" }
-      const nextCell: CellContent = {
-        ...existingCell,
-        raw: autoValue,
-      }
+    const existingCell = newData[row][col] || { raw: "" }
+    const nextCell: CellContent = {
+      ...existingCell,
+      raw: autoValue,
+    }
 
-      if (metricRangeId !== undefined) {
-        nextCell.metricRangeId = metricRangeId
-      }
+    if (nextMetricRangeId === null) {
+      delete nextCell.metricRangeId
+    } else if (nextMetricRangeId !== undefined) {
+      nextCell.metricRangeId = nextMetricRangeId
+    }
 
-      newData[row][col] = nextCell
-      return newData
-    })
+    newData[row][col] = nextCell
 
-    if (onCellChange) {
+    if (oldMetricRangeId && oldMetricRangeId !== (nextMetricRangeId ?? null)) {
+      cleanupNeeded = true
+    }
+
+    pendingSheetUpdatesRef.current.set(targetSheetId, newData)
+    if (targetSheetId === activeSheet?.id) {
+      latestGridDataRef.current = newData
+    }
+
+    updateSheetData(targetSheetId, newData)
+
+    if (cleanupNeeded) {
+      setTimeout(() => {
+        cleanupOrphanedMetricRanges()
+      }, 0)
+    }
+
+    // If the cell contains a METRIC formula, evaluate it
+    if (isMetricFormula(autoValue) && targetSheetId === activeSheet?.id) {
+      void evaluateMetricCell(row, col, autoValue)
+    }
+
+    if (onCellChange && targetSheetId === activeSheet?.id) {
       onCellChange(row, col, autoValue)
     }
-    if (onFormulaChange && row === activeCell.row && col === activeCell.col) {
+    if (
+      onFormulaChange &&
+      targetSheetId === (editingSheetIdRef.current ?? activeSheet?.id) &&
+      row === activeCell.row &&
+      col === activeCell.col
+    ) {
       onFormulaChange(autoValue)
     }
-  }, [activeCell.col, activeCell.row, gridData, onCellChange, onFormulaChange])
+  }, [
+    activeCell.col,
+    activeCell.row,
+    activeSheet,
+    cleanupOrphanedMetricRanges,
+    evaluateMetricCell,
+    onCellChange,
+    onFormulaChange,
+    getSheet,
+    updateSheetData,
+    getHyperFormulaSheetId,
+  ])
 
   const applyMetricRange = useCallback((config: MetricRangeConfig) => {
     const uniqueSortedColumns = Array.from(new Set(config.columns)).sort((a, b) => a - b)
@@ -1076,6 +1321,14 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       ...config,
       columns: uniqueSortedColumns,
       rows: normalizedRows,
+    }
+
+    if (process.env.NODE_ENV !== "production") {
+      console.debug("[grid] applyMetricRange", {
+        id: normalizedConfig.id,
+        columns: uniqueSortedColumns,
+        rows: normalizedRows.map(r => ({ ...r })),
+      })
     }
 
     const previousConfig = metricRanges[normalizedConfig.id]
@@ -1102,13 +1355,15 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       })
     })
 
-    setMetricRanges(prev => ({
-      ...prev,
-      [normalizedConfig.id]: normalizedConfig,
-    }))
+    if (activeSheet) {
+      updateSheetMetricRanges(activeSheet.id, {
+        ...metricRanges,
+        [normalizedConfig.id]: normalizedConfig,
+      })
+    }
 
     setHoveredMetricRangeId(normalizedConfig.id)
-  }, [metricRanges, updateCellValue])
+  }, [activeSheet, metricRanges, updateCellValue, updateSheetMetricRanges])
 
   const getMetricRange = useCallback((id: string): MetricRangeConfig | null => {
     return metricRanges[id] ?? null
@@ -1541,13 +1796,41 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   }, [editingCell, finalizeReferenceSelection])
 
   useEffect(() => {
+    const isEditing = Boolean(editingCell)
+    if (isEditing && activeSheet && !editingSheetIdRef.current) {
+      editingSheetIdRef.current = activeSheet.id
+    }
+    const statePayload = {
+      isEditing,
+      sheetId: editingSheetIdRef.current,
+      isFormula: isEditing ? editValue.startsWith("=") : false,
+    }
+    const prev = previousEditingStateRef.current
+    if (
+      prev.isEditing !== statePayload.isEditing ||
+      prev.sheetId !== statePayload.sheetId ||
+      prev.isFormula !== statePayload.isFormula
+    ) {
+      previousEditingStateRef.current = statePayload
+      onEditingStateChange?.(statePayload)
+    }
+    if (!isEditing && editingSheetIdRef.current) {
+      editingSheetIdRef.current = null
+    }
+  }, [editingCell, editValue, activeSheet, onEditingStateChange])
+
+  useEffect(() => {
     return () => {
       finalizeReferenceSelection()
     }
   }, [finalizeReferenceSelection])
 
   const startReferenceSelection = useCallback(
-    (row: number, col: number, options: { bindMouseUp?: boolean } = { bindMouseUp: true }) => {
+    (
+      row: number,
+      col: number,
+      options: { bindMouseUp?: boolean; sheetId?: string | null; sheetName?: string | null } = { bindMouseUp: true }
+    ) => {
       const input = inputRef.current
       if (!input) return
 
@@ -1558,26 +1841,36 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       const currentValue = input.value
       const selectionStart = input.selectionStart ?? currentValue.length
       const selectionEnd = input.selectionEnd ?? selectionStart
+      const sheetId = options.sheetId ?? activeSheet?.id ?? null
+      const sheetName = options.sheetName ?? activeSheet?.name ?? null
+      const includeSheetPrefix =
+        Boolean(sheetId && editingSheetIdRef.current && sheetId !== editingSheetIdRef.current)
       const address = getCellAddress(row, col)
+      const prefix = includeSheetPrefix ? formatSheetPrefix(sheetName ?? "") : ""
+      const addressToken = `${prefix}${address}`
       const before = currentValue.slice(0, selectionStart)
       const after = currentValue.slice(selectionEnd)
-      const nextValue = `${before}${address}${after}`
+      const nextValue = `${before}${addressToken}${after}`
       const insertionStart = before.length
-      const insertionEnd = insertionStart + address.length
+      const insertionEnd = insertionStart + addressToken.length
 
       pendingReferenceRef.current = {
         startIndex: insertionStart,
         endIndex: insertionEnd,
         anchor: { row, col },
+        sheetId,
+        sheetName,
+        includeSheetPrefix,
       }
       referenceSelectionActiveRef.current = true
       setReferencePreview({
         start: { row, col },
         end: { row, col },
+        sheetId,
       })
       setEditValue(nextValue)
       computeFunctionSuggestions(nextValue)
-      keyboardReferenceCursorRef.current = { row, col }
+      keyboardReferenceCursorRef.current = { row, col, sheetId }
       requestAnimationFrame(() => {
         inputRef.current?.focus()
         inputRef.current?.setSelectionRange(insertionEnd, insertionEnd)
@@ -1586,7 +1879,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         window.addEventListener("mouseup", finalizeReferenceSelection)
       }
     },
-    [computeFunctionSuggestions, finalizeReferenceSelection]
+    [activeSheet?.id, activeSheet?.name, computeFunctionSuggestions, finalizeReferenceSelection]
   )
 
   const updateReferenceSelection = useCallback(
@@ -1596,6 +1889,9 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       }
       const pending = pendingReferenceRef.current
       if (!pending) return
+      if (pending.sheetId && activeSheet && pending.sheetId !== activeSheet.id) {
+        return
+      }
 
       const anchor = pending.anchor
       const startRow = Math.min(anchor.row, row)
@@ -1605,12 +1901,15 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
       const startAddress = getCellAddress(startRow, startCol)
       const endAddress = getCellAddress(endRow, endCol)
-      const referenceString =
+      const cellReference =
         startRow === endRow && startCol === endCol ? getCellAddress(anchor.row, anchor.col) : `${startAddress}:${endAddress}`
+      const prefix = pending.includeSheetPrefix ? formatSheetPrefix(pending.sheetName ?? "") : ""
+      const referenceString = `${prefix}${cellReference}`
 
       setReferencePreview({
         start: { row: startRow, col: startCol },
         end: { row: endRow, col: endCol },
+        sheetId: pending.sheetId,
       })
 
       setEditValue((prev) => {
@@ -1640,9 +1939,9 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
           inputRef.current?.setSelectionRange(currentPending.endIndex, currentPending.endIndex)
         }
       })
-      keyboardReferenceCursorRef.current = { row, col }
+      keyboardReferenceCursorRef.current = { row, col, sheetId: pending.sheetId }
     },
-    []
+    [activeSheet]
   )
 
   const queueSuggestionRefresh = useCallback(() => {
@@ -1679,12 +1978,14 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       const currentValue = inputRef.current?.value ?? editValue
       const isFormulaEdit = currentValue.startsWith("=")
       const isSameCell = editingCell.row === row && editingCell.col === col
+      const currentSheetId = activeSheet?.id ?? null
+      const currentSheetName = activeSheet?.name ?? null
 
       if (isFormulaEdit) {
         event.preventDefault()
         event.stopPropagation()
         if (!isSameCell) {
-          startReferenceSelection(row, col)
+          startReferenceSelection(row, col, { sheetId: currentSheetId, sheetName: currentSheetName })
         } else {
           inputRef.current?.focus()
         }
@@ -1709,7 +2010,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     }
 
     onCellClick({ row, col })
-  }, [editingCell, editValue, startReferenceSelection, finalizeReferenceSelection, addCellToSelection, extendSelectionTo, selectSingleCell, stopSelectionDragging, onCellClick])
+  }, [activeSheet?.id, activeSheet?.name, editingCell, editValue, startReferenceSelection, finalizeReferenceSelection, addCellToSelection, extendSelectionTo, selectSingleCell, stopSelectionDragging, onCellClick])
 
   const handleCellMouseEnter = useCallback((event: ReactMouseEvent<HTMLDivElement>, row: number, col: number) => {
     if (selectionDraggingRef.current && !editingCell) {
@@ -1754,7 +2055,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
       return newData
     })
-  }, [getSelectionEnvelope])
+  }, [getSelectionEnvelope, setGridData])
 
   const getSelectionFormat = useCallback((): CellFormat | null => {
     const envelope = getSelectionEnvelope()
@@ -1978,41 +2279,55 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         const nextCol = clamp(anchorCol + dCol, 0, columns.length - 1)
 
         if (e.shiftKey) {
-          startReferenceSelection(anchorRow, anchorCol, { bindMouseUp: false })
+          startReferenceSelection(anchorRow, anchorCol, {
+            bindMouseUp: false,
+            sheetId: activeSheet?.id ?? null,
+            sheetName: activeSheet?.name ?? null,
+          })
           updateReferenceSelection(nextRow, nextCol)
         } else {
-          startReferenceSelection(nextRow, nextCol, { bindMouseUp: false })
+          startReferenceSelection(nextRow, nextCol, {
+            bindMouseUp: false,
+            sheetId: activeSheet?.id ?? null,
+            sheetName: activeSheet?.name ?? null,
+          })
         }
         return
       }
 
       // Continue existing reference selection
+      const pending = pendingReferenceRef.current
       const targetRow = clamp(currentCursor.row + dRow, 0, NUM_ROWS - 1)
       const targetCol = clamp(currentCursor.col + dCol, 0, columns.length - 1)
+      if (pending?.sheetId && currentCursor.sheetId && pending.sheetId !== currentCursor.sheetId) {
+        return
+      }
 
       if (e.shiftKey) {
         updateReferenceSelection(targetRow, targetCol)
       } else {
         // Replace current reference with new cell (update anchor and indices)
-        const pending = pendingReferenceRef.current
         if (pending) {
           const input = inputRef.current
           if (input) {
             const currentValue = input.value
             const address = getCellAddress(targetRow, targetCol)
+            const prefix = pending.includeSheetPrefix ? formatSheetPrefix(pending.sheetName ?? "") : ""
+            const referenceToken = `${prefix}${address}`
             const before = currentValue.slice(0, pending.startIndex)
             const after = currentValue.slice(pending.endIndex)
-            const nextValue = `${before}${address}${after}`
+            const nextValue = `${before}${referenceToken}${after}`
 
             pending.anchor = { row: targetRow, col: targetCol }
-            pending.endIndex = pending.startIndex + address.length
+            pending.endIndex = pending.startIndex + referenceToken.length
 
             setEditValue(nextValue)
             setReferencePreview({
               start: { row: targetRow, col: targetCol },
               end: { row: targetRow, col: targetCol },
+              sheetId: pending.sheetId,
             })
-            keyboardReferenceCursorRef.current = { row: targetRow, col: targetCol }
+            keyboardReferenceCursorRef.current = { row: targetRow, col: targetCol, sheetId: pending.sheetId }
 
             requestAnimationFrame(() => {
               inputRef.current?.setSelectionRange(pending.endIndex, pending.endIndex)
@@ -2063,19 +2378,28 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     finalizeReferenceSelection()
     setFunctionSuggestions([])
     if (editingCell) {
-      updateCellValue(editingCell.row, editingCell.col, editValue, { metricRangeId: null })
+      const targetSheetId = editingSheetIdRef.current ?? activeSheet?.id ?? null
+      if (targetSheetId && activeSheet && activeSheet.id !== targetSheetId) {
+        setActiveSheet(targetSheetId)
+      }
+      updateCellValue(editingCell.row, editingCell.col, editValue, { metricRangeId: null }, { sheetId: targetSheetId })
       setEditingCell(null)
       editingSourceRef.current = null
+      editingSheetIdRef.current = null
     }
-  }, [editingCell, editValue, finalizeReferenceSelection, updateCellValue])
+  }, [activeSheet, editValue, editingCell, finalizeReferenceSelection, setActiveSheet, setFunctionSuggestions, updateCellValue])
 
   const cancelEdit = useCallback(() => {
     finalizeReferenceSelection()
     setFunctionSuggestions([])
+    if (editingSheetIdRef.current && activeSheet && activeSheet.id !== editingSheetIdRef.current) {
+      setActiveSheet(editingSheetIdRef.current)
+    }
     setEditingCell(null)
     setEditValue("")
     editingSourceRef.current = null
-  }, [finalizeReferenceSelection])
+    editingSheetIdRef.current = null
+  }, [activeSheet, finalizeReferenceSelection, setActiveSheet, setFunctionSuggestions])
 
   useImperativeHandle(
     ref,
@@ -2094,6 +2418,10 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         setFunctionSuggestions([])
         computeFunctionSuggestions(value)
         finalizeReferenceSelection()
+        if (!editingSheetIdRef.current && activeSheet) {
+          editingSheetIdRef.current = activeSheet.id
+        }
+
         if (focusCell) {
           requestAnimationFrame(() => {
             inputRef.current?.focus()
@@ -2106,16 +2434,35 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         setFunctionSuggestions([])
         finalizeReferenceSelection()
         setEditValue(value)
-        updateCellValue(activeCell.row, activeCell.col, value, { metricRangeId: null })
+        const targetSheetId = editingSheetIdRef.current ?? activeSheet?.id ?? null
+        if (targetSheetId && activeSheet && activeSheet.id !== targetSheetId) {
+          setActiveSheet(targetSheetId)
+        }
+        updateCellValue(activeCell.row, activeCell.col, value, { metricRangeId: null }, { sheetId: targetSheetId })
         setEditingCell(null)
         editingSourceRef.current = null
+        editingSheetIdRef.current = null
       },
-      setCellValue: (row: number, col: number, value: string, options?: { skipUndo?: boolean; metricRangeId?: string | null }) => {
+      setCellValue: (
+        row: number,
+        col: number,
+        value: string,
+        options?: { skipUndo?: boolean; metricRangeId?: string | null; sheetId?: string | null }
+      ) => {
         finalizeReferenceSelection()
         setFunctionSuggestions([])
         setEditingCell(null)
-        updateCellValue(row, col, value, { skipUndo: options?.skipUndo ?? false, metricRangeId: options?.metricRangeId })
+        updateCellValue(
+          row,
+          col,
+          value,
+          { skipUndo: options?.skipUndo ?? false, metricRangeId: options?.metricRangeId },
+          { sheetId: options?.sheetId ?? editingSheetIdRef.current ?? activeSheet?.id ?? null }
+        )
         editingSourceRef.current = null
+        if (options?.sheetId && editingSheetIdRef.current === options.sheetId) {
+          editingSheetIdRef.current = null
+        }
       },
       cancelFormulaDraft: () => {
         cancelEdit()
@@ -2131,6 +2478,14 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       getMetricRange,
       getMetricRanges: () => metricRanges,
       getMetricCells: () => metricCells,
+      preserveEditOnNextBlur: () => {
+        preserveEditOnBlurRef.current = true
+      },
+      getEditingContext: () => ({
+        isEditing: Boolean(editingCell),
+        sheetId: editingSheetIdRef.current,
+        isFormula: Boolean(editingCell && editValue.startsWith("=")),
+      }),
     }),
     [
       activeCell.col,
@@ -2147,10 +2502,19 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       getMetricRange,
       metricRanges,
       metricCells,
+      activeSheet,
+      setActiveSheet,
+      editValue,
+      editingCell,
     ]
   )
 
-  const handleInputBlur = () => {
+  const handleInputBlur = (event: ReactFocusEvent<HTMLInputElement>) => {
+    if (preserveEditOnBlurRef.current) {
+      preserveEditOnBlurRef.current = false
+      event.preventDefault()
+      return
+    }
     commitEdit()
   }
 
@@ -2264,8 +2628,11 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                 displayValue = formatComputedValue(rowIdx, computedValue)
               } else if (computedValue instanceof DetailedCellError) {
                 displayValue = computedValue.value ?? computedValue.message ?? "#ERROR!"
-              } else if (computedValue !== null) {
+              } else if (computedValue !== null && computedValue !== undefined) {
                 displayValue = String(computedValue)
+              } else if (isFormula) {
+                // Formula that evaluates to empty/null (e.g., reference to empty cell)
+                displayValue = ""
               } else {
                 displayValue = rawValue
               }

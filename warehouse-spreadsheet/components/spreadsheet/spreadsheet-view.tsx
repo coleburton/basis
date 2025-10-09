@@ -1,15 +1,17 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useCallback } from "react"
 import { FormulaBar } from "./formula-bar"
 import { SpreadsheetToolbar } from "./spreadsheet-toolbar"
 import { SpreadsheetGrid, type SpreadsheetGridHandle, type MetricRangeConfig } from "./spreadsheet-grid"
 import { MetricsNavigator } from "./metrics-navigator"
 import { InsertMetricDialog } from "./insert-metric-dialog"
+import { SheetTabs } from "./sheet-tabs"
 import { Button } from "@/components/ui/button"
 import { Database, ChevronLeft, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { detectAllDateRanges, type DetectedDateRange } from "@/lib/date-detection"
+import { WorkbookProvider, useWorkbook, type MetricCellResult } from "@/lib/workbook/workbook-context"
 
 interface CellFormat {
   bold?: boolean
@@ -27,21 +29,23 @@ export function SpreadsheetView() {
   const [currentFormat, setCurrentFormat] = useState<CellFormat | null>(null)
   const [detectedRanges, setDetectedRanges] = useState<DetectedDateRange[]>([])
   const [editingMetricRange, setEditingMetricRange] = useState<MetricRangeConfig | null>(null)
-  const [metricRanges, setMetricRanges] = useState<Record<string, MetricRangeConfig>>({})
-  const [metricCells, setMetricCells] = useState<Record<string, { value: number | string | null; loading: boolean; error: string | null }>>({})
+  const [metricCells, setMetricCells] = useState<Record<string, MetricCellResult>>({})
+  const [gridEditingState, setGridEditingState] = useState<{ isEditing: boolean; isFormula: boolean; sheetId: string | null }>({
+    isEditing: false,
+    isFormula: false,
+    sheetId: null,
+  })
 
   const gridRef = useRef<SpreadsheetGridHandle>(null)
   const formulaUpdateFromGrid = useRef(false)
   const detectedRangesRef = useRef<DetectedDateRange[]>([])
   const lastGridDataHashRef = useRef<string>("")
 
-  // Update metrics data periodically
+  // Update metric cells periodically (metricRanges come from activeSheet)
   useEffect(() => {
     const updateMetrics = () => {
       if (!gridRef.current) return
-      const ranges = gridRef.current.getMetricRanges()
       const cells = gridRef.current.getMetricCells()
-      setMetricRanges(ranges)
       setMetricCells(cells)
     }
 
@@ -97,7 +101,7 @@ export function SpreadsheetView() {
     return () => clearInterval(interval)
   }, [])
 
-  const handleGridFormulaChange = (value: string) => {
+  const handleGridFormulaChange = (value: string, _sheetId?: string) => {
     formulaUpdateFromGrid.current = true
     setFormula(value)
   }
@@ -127,6 +131,7 @@ export function SpreadsheetView() {
 
   const handleFormulaCancel = () => {
     gridRef.current?.cancelFormulaDraft()
+    setFormula("")
   }
 
   const handleFormulaFocus = () => {
@@ -208,6 +213,135 @@ export function SpreadsheetView() {
     }
   }
 
+  // Wrap the formula change handler to pass sheet context
+  const wrappedHandleGridFormulaChange = useCallback((value: string) => {
+    // We can't easily get activeSheet here since it's in WorkbookProvider
+    // So we'll pass sheetId from the grid component
+    handleGridFormulaChange(value)
+  }, [])
+
+  return (
+    <WorkbookProvider>
+      <SpreadsheetViewInner
+        formula={formula}
+        activeCell={activeCell}
+        isInsertMetricOpen={isInsertMetricOpen}
+        isMetricsCollapsed={isMetricsCollapsed}
+        currentFormat={currentFormat}
+        detectedRanges={detectedRanges}
+        editingMetricRange={editingMetricRange}
+        metricCells={metricCells}
+        gridRef={gridRef}
+        setIsInsertMetricOpen={setIsInsertMetricOpen}
+        setIsMetricsCollapsed={setIsMetricsCollapsed}
+        setEditingMetricRange={setEditingMetricRange}
+        setActiveCell={setActiveCell}
+        handleGridFormulaChange={wrappedHandleGridFormulaChange}
+        handleFormulaInputChange={handleFormulaInputChange}
+        handleFormulaCommit={handleFormulaCommit}
+        handleFormulaCancel={handleFormulaCancel}
+        handleFormulaFocus={handleFormulaFocus}
+        handleFormulaToggleAnchor={handleFormulaToggleAnchor}
+        handleCellChange={handleCellChange}
+        handleEditMetricRange={handleEditMetricRange}
+        handleNavigateToMetric={handleNavigateToMetric}
+        handleBold={handleBold}
+        handleItalic={handleItalic}
+        handleUnderline={handleUnderline}
+        handleAlign={handleAlign}
+        handleNumberFormat={handleNumberFormat}
+        updateCurrentFormat={updateCurrentFormat}
+        handleCellClickWrapper={handleCellClickWrapper}
+        gridEditingState={gridEditingState}
+        onGridEditingStateChange={setGridEditingState}
+      />
+    </WorkbookProvider>
+  )
+}
+
+interface SpreadsheetViewInnerProps {
+  formula: string
+  activeCell: { row: number; col: number }
+  isInsertMetricOpen: boolean
+  isMetricsCollapsed: boolean
+  currentFormat: CellFormat | null
+  detectedRanges: DetectedDateRange[]
+  editingMetricRange: MetricRangeConfig | null
+  metricCells: Record<string, MetricCellResult>
+  gridRef: React.RefObject<SpreadsheetGridHandle>
+  setIsInsertMetricOpen: (value: boolean) => void
+  setIsMetricsCollapsed: (value: boolean | ((prev: boolean) => boolean)) => void
+  setEditingMetricRange: (value: MetricRangeConfig | null) => void
+  setActiveCell: (value: { row: number; col: number }) => void
+  handleGridFormulaChange: (value: string) => void
+  handleFormulaInputChange: (value: string) => void
+  handleFormulaCommit: () => void
+  handleFormulaCancel: () => void
+  handleFormulaFocus: () => void
+  handleFormulaToggleAnchor: () => void
+  handleCellChange: (row: number, col: number, value: string) => void
+  handleEditMetricRange: (range: MetricRangeConfig) => void
+  handleNavigateToMetric: (range: MetricRangeConfig) => void
+  handleBold: () => void
+  handleItalic: () => void
+  handleUnderline: () => void
+  handleAlign: (align: 'left' | 'center' | 'right') => void
+  handleNumberFormat: (format: 'general' | 'currency' | 'percentage' | 'text' | 'date') => void
+  updateCurrentFormat: () => void
+  handleCellClickWrapper: (cell: { row: number; col: number }) => void
+  gridEditingState: { isEditing: boolean; isFormula: boolean; sheetId: string | null }
+  onGridEditingStateChange: (state: { isEditing: boolean; isFormula: boolean; sheetId: string | null }) => void
+}
+
+// Inner component that has access to WorkbookContext
+function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
+  const { activeSheet } = useWorkbook()
+  
+  // Get metric ranges from active sheet
+  const metricRanges = activeSheet?.metricRanges ?? {}
+
+  const {
+    formula,
+    activeCell,
+    isInsertMetricOpen,
+    isMetricsCollapsed,
+    currentFormat,
+    detectedRanges,
+    editingMetricRange,
+    metricCells,
+    gridRef,
+    setIsInsertMetricOpen,
+    setIsMetricsCollapsed,
+    setEditingMetricRange,
+    setActiveCell,
+    handleGridFormulaChange,
+    handleFormulaInputChange,
+    handleFormulaCommit,
+    handleFormulaCancel,
+    handleFormulaFocus,
+    handleFormulaToggleAnchor,
+    handleCellChange,
+    handleEditMetricRange,
+    handleNavigateToMetric,
+    handleBold,
+    handleItalic,
+    handleUnderline,
+    handleAlign,
+    handleNumberFormat,
+    updateCurrentFormat,
+    handleCellClickWrapper,
+    gridEditingState,
+    onGridEditingStateChange,
+  } = props
+
+  const isFormulaEditing = gridEditingState.isEditing && gridEditingState.isFormula
+
+  const handleSheetMouseDown = useCallback((sheetId: string) => {
+    if (isFormulaEditing) {
+      gridRef.current?.preserveEditOnNextBlur()
+    }
+  }, [gridRef, isFormulaEditing])
+
   return (
     <div className="flex h-screen flex-col bg-background">
       {/* Top Toolbar */}
@@ -248,7 +382,7 @@ export function SpreadsheetView() {
             size="icon"
             variant="outline"
             className="absolute -right-3 top-4 z-20 h-6 w-6 rounded-full border-border bg-background shadow-sm"
-            onClick={() => setIsMetricsCollapsed((prev) => !prev)}
+            onClick={() => setIsMetricsCollapsed((prev: boolean) => !prev)}
           >
             {isMetricsCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
           </Button>
@@ -269,16 +403,25 @@ export function SpreadsheetView() {
         </div>
 
         {/* Spreadsheet Grid */}
-        <div className="flex-1 overflow-auto">
-        <SpreadsheetGrid
-          ref={gridRef}
-          activeCell={activeCell}
-          onCellClick={handleCellClickWrapper}
-          onCellChange={handleCellChange}
-          onFormulaChange={handleGridFormulaChange}
-          detectedRanges={detectedRanges}
-          onEditMetricRange={handleEditMetricRange}
-        />
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex-1 overflow-auto">
+            <SpreadsheetGrid
+              ref={gridRef}
+              activeCell={activeCell}
+              onCellClick={handleCellClickWrapper}
+              onCellChange={handleCellChange}
+              onFormulaChange={(value: string) => handleGridFormulaChange(value)}
+              onEditingStateChange={onGridEditingStateChange}
+              detectedRanges={detectedRanges}
+              onEditMetricRange={handleEditMetricRange}
+            />
+          </div>
+
+          {/* Sheet Tabs */}
+          <SheetTabs
+            isFormulaEditing={isFormulaEditing}
+            onSheetMouseDown={handleSheetMouseDown}
+          />
         </div>
       </div>
 
