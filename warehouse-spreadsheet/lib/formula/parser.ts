@@ -7,12 +7,14 @@ export interface CellReference {
   type: 'cell';
   column: string;
   row: number;
+  sheetName?: string; // Optional sheet name for cross-sheet references
 }
 
 export interface RangeReference {
   type: 'range';
   start: CellReference;
   end: CellReference;
+  sheetName?: string; // Optional sheet name for cross-sheet references
 }
 
 export type Reference = CellReference | RangeReference;
@@ -51,9 +53,22 @@ export function indexToColumn(index: number): string {
 }
 
 /**
- * Parses a cell reference like "A1" or "AA100"
+ * Parses a cell reference like "A1", "AA100", or "Sheet2!A1", or "'Sheet Name'!A1"
  */
 export function parseCellReference(ref: string): CellReference | null {
+  // Match cross-sheet reference with sheet name (Sheet2!A1 or 'Sheet Name'!A1)
+  const crossSheetMatch = ref.match(/^(?:'([^']+)'|([A-Za-z0-9_]+))!([A-Z]+)(\d+)$/);
+  if (crossSheetMatch) {
+    const [, quotedSheetName, unquotedSheetName, column, row] = crossSheetMatch;
+    return {
+      type: 'cell',
+      column,
+      row: parseInt(row, 10),
+      sheetName: quotedSheetName || unquotedSheetName,
+    };
+  }
+
+  // Match regular cell reference (A1)
   const match = ref.match(/^([A-Z]+)(\d+)$/);
   if (!match) return null;
 
@@ -66,9 +81,33 @@ export function parseCellReference(ref: string): CellReference | null {
 }
 
 /**
- * Parses a range reference like "A1:C100"
+ * Parses a range reference like "A1:C100", "Sheet2!A1:C100", or "'Sheet Name'!A1:C100"
  */
 export function parseRangeReference(ref: string): RangeReference | null {
+  // Match cross-sheet range reference (Sheet2!A1:C100 or 'Sheet Name'!A1:C100)
+  const crossSheetMatch = ref.match(/^(?:'([^']+)'|([A-Za-z0-9_]+))!([A-Z]+\d+):([A-Z]+\d+)$/);
+  if (crossSheetMatch) {
+    const [, quotedSheetName, unquotedSheetName, startRef, endRef] = crossSheetMatch;
+    const sheetName = quotedSheetName || unquotedSheetName;
+
+    const start = parseCellReference(startRef);
+    const end = parseCellReference(endRef);
+
+    if (!start || !end) return null;
+
+    // Add sheet name to the start and end cells
+    start.sheetName = sheetName;
+    end.sheetName = sheetName;
+
+    return {
+      type: 'range',
+      start,
+      end,
+      sheetName,
+    };
+  }
+
+  // Match regular range reference (A1:C100)
   const match = ref.match(/^([A-Z]+\d+):([A-Z]+\d+)$/);
   if (!match) return null;
 
@@ -94,16 +133,31 @@ export function parseReference(ref: string): Reference | null {
 
 /**
  * Extracts all cell and range references from a formula
+ * Supports cross-sheet references like Sheet2!A1 or 'Sheet Name'!A1:C100
  */
 export function extractReferences(formula: string): Reference[] {
   const references: Reference[] = [];
 
-  // Match range references first (A1:C100)
-  const rangePattern = /([A-Z]+\d+):([A-Z]+\d+)/g;
+  // Match cross-sheet range references first (Sheet2!A1:C100 or 'Sheet Name'!A1:C100)
+  const crossSheetRangePattern = /(?:'([^']+)'|([A-Za-z0-9_]+))!([A-Z]+\d+):([A-Z]+\d+)/g;
   let match;
 
+  while ((match = crossSheetRangePattern.exec(formula)) !== null) {
+    const ref = parseRangeReference(match[0]);
+    if (ref) references.push(ref);
+  }
+
+  // Match regular range references (A1:C100)
+  const rangePattern = /\b([A-Z]+\d+):([A-Z]+\d+)\b/g;
   while ((match = rangePattern.exec(formula)) !== null) {
     const ref = parseRangeReference(match[0]);
+    if (ref) references.push(ref);
+  }
+
+  // Match cross-sheet cell references (Sheet2!A1 or 'Sheet Name'!A1)
+  const crossSheetCellPattern = /(?:'([^']+)'|([A-Za-z0-9_]+))!([A-Z]+\d+)/g;
+  while ((match = crossSheetCellPattern.exec(formula)) !== null) {
+    const ref = parseCellReference(match[0]);
     if (ref) references.push(ref);
   }
 
@@ -116,13 +170,15 @@ export function extractReferences(formula: string): Reference[] {
           `${ref.start.column}${ref.start.row}`,
           `${ref.end.column}${ref.end.row}`
         ];
+      } else if (ref.type === 'cell' && ref.sheetName) {
+        return [`${ref.column}${ref.row}`];
       }
       return [];
     })
   );
 
   while ((match = cellPattern.exec(formula)) !== null) {
-    // Skip if this cell is part of a range we already found
+    // Skip if this cell is part of a range or cross-sheet reference we already found
     if (!processedRanges.has(match[1])) {
       const ref = parseCellReference(match[1]);
       if (ref) references.push(ref);

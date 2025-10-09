@@ -22,6 +22,7 @@ import {
   evaluateMetricFormula,
   type MetricEvaluationResult
 } from "@/lib/formula/metric-evaluator"
+import { useWorkbook } from "@/lib/workbook/workbook-context"
 
 interface SpreadsheetGridProps {
   activeCell: { row: number; col: number }
@@ -512,7 +513,25 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   onEditMetricRange,
 }: SpreadsheetGridProps, ref) {
   const initialGrid = useMemo(() => createInitialGridData(), [])
-  const [gridData, setGridData] = useState<CellContent[][]>(initialGrid)
+
+  // Use workbook context for multi-sheet support
+  const { activeSheet, updateSheetData } = useWorkbook()
+  const gridData = activeSheet?.gridData ?? initialGrid
+  const latestGridDataRef = useRef<CellContent[][]>(gridData)
+
+  useEffect(() => {
+    latestGridDataRef.current = gridData
+  }, [gridData])
+
+  // Wrapper to sync grid data changes to workbook context while supporting batched updates
+  const setGridData = useCallback((updater: CellContent[][] | ((prev: CellContent[][]) => CellContent[][])) => {
+    if (!activeSheet) return
+    const baseData = latestGridDataRef.current
+    const newData = typeof updater === 'function' ? updater(baseData) : updater
+    latestGridDataRef.current = newData
+    updateSheetData(activeSheet.id, newData)
+  }, [activeSheet, updateSheetData])
+
   const hyperFormulaRef = useRef<HyperFormula | null>(null)
   const sheetIdRef = useRef<number>(0)
   const cellRefs = useRef<HTMLDivElement[][]>([])
@@ -783,8 +802,17 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     [handleRowResizeEnd, handleRowResizeMove, rowHeights]
   )
 
+  // Initialize HyperFormula when active sheet changes
   useEffect(() => {
-    const sheetData = initialGrid.map(row => row.map(cell => normalizeValueForEngine(cell.raw, cell.format)))
+    if (!activeSheet) return
+
+    const sheetData = activeSheet.gridData.map(row => row.map(cell => normalizeValueForEngine(cell.raw, cell.format)))
+
+    // Destroy existing instance if present
+    if (hyperFormulaRef.current) {
+      hyperFormulaRef.current.destroy()
+    }
+
     const hf = HyperFormula.buildFromArray(sheetData, { licenseKey: "gpl-v3" })
 
     hyperFormulaRef.current = hf
@@ -797,7 +825,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       hf.destroy()
       hyperFormulaRef.current = null
     }
-  }, [initialGrid])
+  }, [activeSheet]) // Re-initialize when active sheet changes
 
   useEffect(() => {
     if (suppressSelectionSyncRef.current) {
@@ -998,15 +1026,50 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     })
   }, [gridData, evaluateMetricCell])
 
+  // Cleanup orphaned metric ranges (ranges with no cells referencing them)
+  const cleanupOrphanedMetricRanges = useCallback(() => {
+    const currentGrid = latestGridDataRef.current ?? []
+    setMetricRanges(prev => {
+      const referencedRangeIds = new Set<string>()
+
+      for (const row of currentGrid) {
+        for (const cell of row) {
+          if (cell?.metricRangeId) {
+            referencedRangeIds.add(cell.metricRangeId)
+          }
+        }
+      }
+
+      const cleanedRanges: Record<string, MetricRangeConfig> = {}
+      let hasChanges = false
+      for (const [id, config] of Object.entries(prev)) {
+        if (referencedRangeIds.has(id)) {
+          cleanedRanges[id] = config
+        } else {
+          hasChanges = true
+        }
+      }
+
+      return hasChanges ? cleanedRanges : prev
+    })
+  }, [])
+
   const updateCellValue = useCallback((row: number, col: number, value: string, options: { skipUndo?: boolean; metricRangeId?: string | null } = {}) => {
     const { skipUndo = false, metricRangeId } = options
     const autoValue = autoCloseFormula(value)
+    const trimmedAutoValue = autoValue.trim()
     const hf = hyperFormulaRef.current
     const address: SimpleCellAddress = { sheet: sheetIdRef.current, row, col }
 
     const currentCell = gridData[row]?.[col]
     const currentFormat = currentCell?.format
     const normalized = normalizeValueForEngine(autoValue, currentFormat)
+    let cleanupNeeded = false
+
+    if (process.env.NODE_ENV !== "production") {
+      // Helpful debug trace for tricky range updates
+      console.debug("[grid] updateCellValue", { row, col, value: autoValue, metricRangeId })
+    }
 
     if (hf) {
       try {
@@ -1020,7 +1083,15 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       const prevCell = prevData[row]?.[col]
       const oldValue = prevCell?.raw ?? ""
       const oldMetricRangeId = prevCell?.metricRangeId ?? null
-      const newMetricRangeId = metricRangeId !== undefined ? metricRangeId : oldMetricRangeId
+      let nextMetricRangeId: string | null | undefined
+
+      if (metricRangeId !== undefined) {
+        nextMetricRangeId = metricRangeId
+      } else if (trimmedAutoValue === "") {
+        nextMetricRangeId = null
+      } else {
+        nextMetricRangeId = oldMetricRangeId
+      }
 
       if (!skipUndo && oldValue !== autoValue) {
         setUndoStack(prev => [...prev, {
@@ -1031,7 +1102,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
             oldValue,
             newValue: autoValue,
             oldMetricRangeId,
-            newMetricRangeId,
+            newMetricRangeId: nextMetricRangeId ?? null,
           }]
         }])
         setRedoStack([])
@@ -1048,13 +1119,26 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         raw: autoValue,
       }
 
-      if (metricRangeId !== undefined) {
-        nextCell.metricRangeId = metricRangeId
+      if (nextMetricRangeId === null) {
+        delete nextCell.metricRangeId
+      } else if (nextMetricRangeId !== undefined) {
+        nextCell.metricRangeId = nextMetricRangeId
       }
 
       newData[row][col] = nextCell
+
+      if (oldMetricRangeId && oldMetricRangeId !== (nextMetricRangeId ?? null)) {
+        cleanupNeeded = true
+      }
+
       return newData
     })
+
+    if (cleanupNeeded) {
+      setTimeout(() => {
+        cleanupOrphanedMetricRanges()
+      }, 0)
+    }
 
     if (onCellChange) {
       onCellChange(row, col, autoValue)
@@ -1062,7 +1146,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     if (onFormulaChange && row === activeCell.row && col === activeCell.col) {
       onFormulaChange(autoValue)
     }
-  }, [activeCell.col, activeCell.row, gridData, onCellChange, onFormulaChange])
+  }, [activeCell.col, activeCell.row, gridData, onCellChange, onFormulaChange, setGridData, cleanupOrphanedMetricRanges])
 
   const applyMetricRange = useCallback((config: MetricRangeConfig) => {
     const uniqueSortedColumns = Array.from(new Set(config.columns)).sort((a, b) => a - b)
@@ -1076,6 +1160,14 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       ...config,
       columns: uniqueSortedColumns,
       rows: normalizedRows,
+    }
+
+    if (process.env.NODE_ENV !== "production") {
+      console.debug("[grid] applyMetricRange", {
+        id: normalizedConfig.id,
+        columns: uniqueSortedColumns,
+        rows: normalizedRows.map(r => ({ ...r })),
+      })
     }
 
     const previousConfig = metricRanges[normalizedConfig.id]
@@ -1754,7 +1846,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
       return newData
     })
-  }, [getSelectionEnvelope])
+  }, [getSelectionEnvelope, setGridData])
 
   const getSelectionFormat = useCallback((): CellFormat | null => {
     const envelope = getSelectionEnvelope()
@@ -2264,8 +2356,11 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                 displayValue = formatComputedValue(rowIdx, computedValue)
               } else if (computedValue instanceof DetailedCellError) {
                 displayValue = computedValue.value ?? computedValue.message ?? "#ERROR!"
-              } else if (computedValue !== null) {
+              } else if (computedValue !== null && computedValue !== undefined) {
                 displayValue = String(computedValue)
+              } else if (isFormula) {
+                // Formula that evaluates to empty/null (e.g., reference to empty cell)
+                displayValue = ""
               } else {
                 displayValue = rawValue
               }
