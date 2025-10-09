@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Database, ChevronLeft, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { detectAllDateRanges, type DetectedDateRange } from "@/lib/date-detection"
-import { WorkbookProvider, useWorkbook } from "@/lib/workbook/workbook-context"
+import { WorkbookProvider, useWorkbook, type MetricCellResult } from "@/lib/workbook/workbook-context"
 
 interface CellFormat {
   bold?: boolean
@@ -29,24 +29,23 @@ export function SpreadsheetView() {
   const [currentFormat, setCurrentFormat] = useState<CellFormat | null>(null)
   const [detectedRanges, setDetectedRanges] = useState<DetectedDateRange[]>([])
   const [editingMetricRange, setEditingMetricRange] = useState<MetricRangeConfig | null>(null)
-  const [metricRanges, setMetricRanges] = useState<Record<string, MetricRangeConfig>>({})
-  const [metricCells, setMetricCells] = useState<Record<string, { value: number | string | null; loading: boolean; error: string | null }>>({})
+  const [metricCells, setMetricCells] = useState<Record<string, MetricCellResult>>({})
+  const [gridEditingState, setGridEditingState] = useState<{ isEditing: boolean; isFormula: boolean; sheetId: string | null }>({
+    isEditing: false,
+    isFormula: false,
+    sheetId: null,
+  })
 
   const gridRef = useRef<SpreadsheetGridHandle>(null)
   const formulaUpdateFromGrid = useRef(false)
   const detectedRangesRef = useRef<DetectedDateRange[]>([])
   const lastGridDataHashRef = useRef<string>("")
 
-  // Track the sheet where formula editing started
-  const formulaEditingSheetRef = useRef<string | null>(null)
-
-  // Update metrics data periodically
+  // Update metric cells periodically (metricRanges come from activeSheet)
   useEffect(() => {
     const updateMetrics = () => {
       if (!gridRef.current) return
-      const ranges = gridRef.current.getMetricRanges()
       const cells = gridRef.current.getMetricCells()
-      setMetricRanges(ranges)
       setMetricCells(cells)
     }
 
@@ -231,10 +230,8 @@ export function SpreadsheetView() {
         currentFormat={currentFormat}
         detectedRanges={detectedRanges}
         editingMetricRange={editingMetricRange}
-        metricRanges={metricRanges}
         metricCells={metricCells}
         gridRef={gridRef}
-        formulaEditingSheetRef={formulaEditingSheetRef}
         setIsInsertMetricOpen={setIsInsertMetricOpen}
         setIsMetricsCollapsed={setIsMetricsCollapsed}
         setEditingMetricRange={setEditingMetricRange}
@@ -255,6 +252,8 @@ export function SpreadsheetView() {
         handleNumberFormat={handleNumberFormat}
         updateCurrentFormat={updateCurrentFormat}
         handleCellClickWrapper={handleCellClickWrapper}
+        gridEditingState={gridEditingState}
+        onGridEditingStateChange={setGridEditingState}
       />
     </WorkbookProvider>
   )
@@ -268,10 +267,8 @@ interface SpreadsheetViewInnerProps {
   currentFormat: CellFormat | null
   detectedRanges: DetectedDateRange[]
   editingMetricRange: MetricRangeConfig | null
-  metricRanges: Record<string, MetricRangeConfig>
-  metricCells: Record<string, { value: number | string | null; loading: boolean; error: string | null }>
+  metricCells: Record<string, MetricCellResult>
   gridRef: React.RefObject<SpreadsheetGridHandle>
-  formulaEditingSheetRef: React.MutableRefObject<string | null>
   setIsInsertMetricOpen: (value: boolean) => void
   setIsMetricsCollapsed: (value: boolean | ((prev: boolean) => boolean)) => void
   setEditingMetricRange: (value: MetricRangeConfig | null) => void
@@ -292,11 +289,16 @@ interface SpreadsheetViewInnerProps {
   handleNumberFormat: (format: 'general' | 'currency' | 'percentage' | 'text' | 'date') => void
   updateCurrentFormat: () => void
   handleCellClickWrapper: (cell: { row: number; col: number }) => void
+  gridEditingState: { isEditing: boolean; isFormula: boolean; sheetId: string | null }
+  onGridEditingStateChange: (state: { isEditing: boolean; isFormula: boolean; sheetId: string | null }) => void
 }
 
 // Inner component that has access to WorkbookContext
 function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
   const { activeSheet } = useWorkbook()
+  
+  // Get metric ranges from active sheet
+  const metricRanges = activeSheet?.metricRanges ?? {}
 
   const {
     formula,
@@ -306,10 +308,8 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
     currentFormat,
     detectedRanges,
     editingMetricRange,
-    metricRanges,
     metricCells,
     gridRef,
-    formulaEditingSheetRef,
     setIsInsertMetricOpen,
     setIsMetricsCollapsed,
     setEditingMetricRange,
@@ -330,7 +330,17 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
     handleNumberFormat,
     updateCurrentFormat,
     handleCellClickWrapper,
+    gridEditingState,
+    onGridEditingStateChange,
   } = props
+
+  const isFormulaEditing = gridEditingState.isEditing && gridEditingState.isFormula
+
+  const handleSheetMouseDown = useCallback((sheetId: string) => {
+    if (isFormulaEditing) {
+      gridRef.current?.preserveEditOnNextBlur()
+    }
+  }, [gridRef, isFormulaEditing])
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -401,13 +411,17 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
               onCellClick={handleCellClickWrapper}
               onCellChange={handleCellChange}
               onFormulaChange={(value: string) => handleGridFormulaChange(value)}
+              onEditingStateChange={onGridEditingStateChange}
               detectedRanges={detectedRanges}
               onEditMetricRange={handleEditMetricRange}
             />
           </div>
 
           {/* Sheet Tabs */}
-          <SheetTabs />
+          <SheetTabs
+            isFormulaEditing={isFormulaEditing}
+            onSheetMouseDown={handleSheetMouseDown}
+          />
         </div>
       </div>
 

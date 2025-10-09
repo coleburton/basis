@@ -15,11 +15,13 @@ import { cn } from "@/lib/utils"
 
 interface SheetTabsProps {
   className?: string
+  isFormulaEditing?: boolean
+  onSheetMouseDown?: (sheetId: string) => void
 }
 
-export function SheetTabs({ className }: SheetTabsProps) {
+export function SheetTabs({ className, isFormulaEditing = false, onSheetMouseDown }: SheetTabsProps) {
   const { sheets, activeSheetId, addSheet, deleteSheet, renameSheet, setActiveSheet } = useWorkbook()
-  const [editingSheetId, setEditingSheetId] = useState<string | null>(null)
+  const [renamingSheetId, setRenamingSheetId] = useState<string | null>(null)
   const [editingName, setEditingName] = useState("")
 
   const handleAddSheet = () => {
@@ -28,20 +30,20 @@ export function SheetTabs({ className }: SheetTabsProps) {
   }
 
   const handleStartRename = (sheetId: string, currentName: string) => {
-    setEditingSheetId(sheetId)
+    setRenamingSheetId(sheetId)
     setEditingName(currentName)
   }
 
   const handleFinishRename = () => {
-    if (editingSheetId && editingName.trim()) {
-      renameSheet(editingSheetId, editingName.trim())
+    if (renamingSheetId && editingName.trim()) {
+      renameSheet(renamingSheetId, editingName.trim())
     }
-    setEditingSheetId(null)
+    setRenamingSheetId(null)
     setEditingName("")
   }
 
   const handleCancelRename = () => {
-    setEditingSheetId(null)
+    setRenamingSheetId(null)
     setEditingName("")
   }
 
@@ -66,7 +68,7 @@ export function SheetTabs({ className }: SheetTabsProps) {
                 : "text-muted-foreground hover:bg-muted hover:text-foreground"
             )}
           >
-            {editingSheetId === sheet.id ? (
+            {renamingSheetId === sheet.id ? (
               <Input
                 value={editingName}
                 onChange={(e) => setEditingName(e.target.value)}
@@ -78,6 +80,11 @@ export function SheetTabs({ className }: SheetTabsProps) {
             ) : (
               <>
                 <button
+                  onMouseDown={() => {
+                    if (isFormulaEditing) {
+                      onSheetMouseDown?.(sheet.id)
+                    }
+                  }}
                   onClick={() => setActiveSheet(sheet.id)}
                   className="flex-1 cursor-pointer text-left font-medium"
                 >

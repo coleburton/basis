@@ -4,10 +4,11 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Database, MapPin, AlertCircle, CheckCircle2, Loader2 } from "lucide-react"
 import type { MetricRangeConfig } from "./spreadsheet-grid"
+import type { MetricCellResult } from "@/lib/workbook/workbook-context"
 
 interface MetricsNavigatorProps {
   metricRanges: Record<string, MetricRangeConfig>
-  metricCells: Record<string, { value: number | string | null; loading: boolean; error: string | null }>
+  metricCells: Record<string, MetricCellResult>
   onNavigateToMetric: (range: MetricRangeConfig) => void
 }
 

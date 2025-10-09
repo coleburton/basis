@@ -17,10 +17,33 @@ export interface CellContent {
   metricRangeId?: string | null
 }
 
+export interface MetricRangeRowConfig {
+  row: number
+  formula: string
+  label?: string
+}
+
+export interface MetricRangeConfig {
+  id: string
+  metricId: string
+  columns: number[]
+  rows: MetricRangeRowConfig[]
+  displayName?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface MetricCellResult {
+  value: number | string | null
+  loading: boolean
+  error: string | null
+}
+
 export interface Sheet {
   id: string
   name: string
   gridData: CellContent[][]
+  metricRanges: Record<string, MetricRangeConfig>
+  metricCells: Record<string, MetricCellResult>
   hyperformulaSheetId?: number
 }
 
@@ -33,6 +56,8 @@ export interface WorkbookContextValue {
   renameSheet: (sheetId: string, newName: string) => void
   setActiveSheet: (sheetId: string) => void
   updateSheetData: (sheetId: string, gridData: CellContent[][]) => void
+  updateSheetMetricRanges: (sheetId: string, metricRanges: Record<string, MetricRangeConfig>) => void
+  updateSheetMetricCells: (sheetId: string, metricCells: Record<string, MetricCellResult>) => void
   getSheet: (sheetId: string) => Sheet | null
   getSheetByName: (name: string) => Sheet | null
 }
@@ -91,6 +116,8 @@ export function WorkbookProvider({ children }: { children: ReactNode }) {
       id: nanoid(),
       name: "Sheet1",
       gridData: createInitialGridData(),
+      metricRanges: {},
+      metricCells: {},
     }
   ])
 
@@ -109,6 +136,8 @@ export function WorkbookProvider({ children }: { children: ReactNode }) {
         id: newSheetId,
         name: newSheetName,
         gridData: createEmptyGridData(),
+        metricRanges: {},
+        metricCells: {},
       }
     ])
 
@@ -149,6 +178,18 @@ export function WorkbookProvider({ children }: { children: ReactNode }) {
     ))
   }, [])
 
+  const updateSheetMetricRanges = useCallback((sheetId: string, metricRanges: Record<string, MetricRangeConfig>) => {
+    setSheets(prev => prev.map(sheet =>
+      sheet.id === sheetId ? { ...sheet, metricRanges } : sheet
+    ))
+  }, [])
+
+  const updateSheetMetricCells = useCallback((sheetId: string, metricCells: Record<string, MetricCellResult>) => {
+    setSheets(prev => prev.map(sheet =>
+      sheet.id === sheetId ? { ...sheet, metricCells } : sheet
+    ))
+  }, [])
+
   const getSheet = useCallback((sheetId: string): Sheet | null => {
     return sheets.find(s => s.id === sheetId) || null
   }, [sheets])
@@ -166,6 +207,8 @@ export function WorkbookProvider({ children }: { children: ReactNode }) {
     renameSheet,
     setActiveSheet: setActiveSheetFunc,
     updateSheetData,
+    updateSheetMetricRanges,
+    updateSheetMetricCells,
     getSheet,
     getSheetByName,
   }
