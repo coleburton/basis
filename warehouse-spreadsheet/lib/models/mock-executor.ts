@@ -132,7 +132,11 @@ export class MockQueryExecutor {
   private applySimpleFilters(data: any[], filters: Record<string, string | number>): any[] {
     return data.filter(row => {
       return Object.entries(filters).every(([column, value]) => {
-        return row[column] === value;
+        const rowValue = row[column];
+        if (Array.isArray(value)) {
+          return value.includes(rowValue);
+        }
+        return rowValue === value;
       });
     });
   }

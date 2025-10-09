@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { FormulaBar } from "./formula-bar"
 import { SpreadsheetToolbar } from "./spreadsheet-toolbar"
-import { SpreadsheetGrid, type SpreadsheetGridHandle } from "./spreadsheet-grid"
+import { SpreadsheetGrid, type SpreadsheetGridHandle, type MetricRangeConfig } from "./spreadsheet-grid"
 import { PeriodSelector } from "./period-selector"
 import { InsertMetricDialog } from "./insert-metric-dialog"
 import { Button } from "@/components/ui/button"
@@ -16,7 +16,7 @@ interface CellFormat {
   italic?: boolean
   underline?: boolean
   align?: 'left' | 'center' | 'right'
-  numberFormat?: 'general' | 'currency' | 'percentage' | 'text'
+  numberFormat?: 'general' | 'currency' | 'percentage' | 'text' | 'date'
 }
 
 export function SpreadsheetView() {
@@ -26,6 +26,7 @@ export function SpreadsheetView() {
   const [isPeriodCollapsed, setIsPeriodCollapsed] = useState(false)
   const [currentFormat, setCurrentFormat] = useState<CellFormat | null>(null)
   const [detectedRanges, setDetectedRanges] = useState<DetectedDateRange[]>([])
+  const [editingMetricRange, setEditingMetricRange] = useState<MetricRangeConfig | null>(null)
 
   const gridRef = useRef<SpreadsheetGridHandle>(null)
   const formulaUpdateFromGrid = useRef(false)
@@ -83,7 +84,7 @@ export function SpreadsheetView() {
     if (formulaUpdateFromGrid.current) {
       return
     }
-    gridRef.current?.setFormulaDraft(newFormula)
+    gridRef.current?.setFormulaDraft(newFormula, { focusCell: false, source: 'formulaBar' })
   }
 
   const handleFormulaCommit = () => {
@@ -95,11 +96,25 @@ export function SpreadsheetView() {
   }
 
   const handleFormulaFocus = () => {
-    gridRef.current?.setFormulaDraft(formula)
+    gridRef.current?.setFormulaDraft(formula, { focusCell: false, source: 'formulaBar' })
   }
 
   const handleFormulaToggleAnchor = () => {
     gridRef.current?.toggleReferenceAnchor()
+  }
+
+  const handleEditMetricRange = (range: MetricRangeConfig) => {
+    const clonedRange: MetricRangeConfig = {
+      ...range,
+      columns: [...range.columns],
+      rows: range.rows.map(row => ({ ...row })),
+      metadata: range.metadata ? JSON.parse(JSON.stringify(range.metadata)) : undefined,
+    }
+    setEditingMetricRange(clonedRange)
+    setIsInsertMetricOpen(true)
+    const firstCol = clonedRange.columns[0] ?? 0
+    const firstRow = clonedRange.rows[0]?.row ?? 0
+    setActiveCell({ row: firstRow, col: firstCol })
   }
 
   const updateCurrentFormat = () => {
@@ -131,7 +146,7 @@ export function SpreadsheetView() {
     updateCurrentFormat()
   }
 
-  const handleNumberFormat = (format: 'general' | 'currency' | 'percentage' | 'text') => {
+  const handleNumberFormat = (format: 'general' | 'currency' | 'percentage' | 'text' | 'date') => {
     gridRef.current?.applyFormatting({ numberFormat: format })
     updateCurrentFormat()
   }
@@ -152,7 +167,10 @@ export function SpreadsheetView() {
     <div className="flex h-screen flex-col bg-background">
       {/* Top Toolbar */}
       <SpreadsheetToolbar
-        onInsertMetric={() => setIsInsertMetricOpen(true)}
+        onInsertMetric={() => {
+          setEditingMetricRange(null)
+          setIsInsertMetricOpen(true)
+        }}
         onBold={handleBold}
         onItalic={handleItalic}
         onUnderline={handleUnderline}
@@ -203,14 +221,15 @@ export function SpreadsheetView() {
 
         {/* Spreadsheet Grid */}
         <div className="flex-1 overflow-auto">
-          <SpreadsheetGrid
-            ref={gridRef}
-            activeCell={activeCell}
-            onCellClick={handleCellClickWrapper}
-            onCellChange={handleCellChange}
-            onFormulaChange={handleGridFormulaChange}
-            detectedRanges={detectedRanges}
-          />
+        <SpreadsheetGrid
+          ref={gridRef}
+          activeCell={activeCell}
+          onCellClick={handleCellClickWrapper}
+          onCellChange={handleCellChange}
+          onFormulaChange={handleGridFormulaChange}
+          detectedRanges={detectedRanges}
+          onEditMetricRange={handleEditMetricRange}
+        />
         </div>
       </div>
 
@@ -220,6 +239,9 @@ export function SpreadsheetView() {
         gridData={gridRef.current?.getGridData()}
         activeCell={activeCell}
         detectedRanges={detectedRanges}
+        gridRef={gridRef}
+        editingRange={editingMetricRange}
+        onClearEditingRange={() => setEditingMetricRange(null)}
       />
     </div>
   )

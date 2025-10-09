@@ -11,11 +11,17 @@ import {
   useMemo,
   forwardRef,
   useImperativeHandle,
+  type CSSProperties,
 } from "react"
 import { HyperFormula, DetailedCellError, type CellValue, type SimpleCellAddress } from "hyperformula"
 import { parseFormula } from "@/lib/formula/parser"
 import { cn } from "@/lib/utils"
 import { type DetectedDateRange } from "@/lib/date-detection"
+import {
+  isMetricFormula,
+  evaluateMetricFormula,
+  type MetricEvaluationResult
+} from "@/lib/formula/metric-evaluator"
 
 interface SpreadsheetGridProps {
   activeCell: { row: number; col: number }
@@ -23,6 +29,7 @@ interface SpreadsheetGridProps {
   onCellChange?: (row: number, col: number, value: string) => void
   onFormulaChange?: (formula: string) => void
   detectedRanges?: DetectedDateRange[]
+  onEditMetricRange?: (config: MetricRangeConfig) => void
 }
 
 interface CellFormat {
@@ -30,22 +37,41 @@ interface CellFormat {
   italic?: boolean
   underline?: boolean
   align?: 'left' | 'center' | 'right'
-  numberFormat?: 'general' | 'currency' | 'percentage' | 'text'
+  numberFormat?: 'general' | 'currency' | 'percentage' | 'text' | 'date'
 }
 
 interface CellContent {
   raw: string // The raw value or formula
   format?: CellFormat
+  metricRangeId?: string | null
+}
+
+export interface MetricRangeRowConfig {
+  row: number
+  formula: string
+  label?: string
+}
+
+export interface MetricRangeConfig {
+  id: string
+  metricId: string
+  columns: number[]
+  rows: MetricRangeRowConfig[]
+  displayName?: string
+  metadata?: Record<string, unknown>
 }
 
 export interface SpreadsheetGridHandle {
-  setFormulaDraft: (value: string) => void
+  setFormulaDraft: (value: string, options?: { focusCell?: boolean; source?: 'grid' | 'formulaBar' }) => void
   commitFormulaDraft: (value: string) => void
   cancelFormulaDraft: () => void
   toggleReferenceAnchor: () => void
   applyFormatting: (format: Partial<CellFormat>) => void
   getSelectionFormat: () => CellFormat | null
   getGridData: () => CellContent[][]
+  setCellValue: (row: number, col: number, value: string, options?: { skipUndo?: boolean; metricRangeId?: string | null }) => void
+  applyMetricRange: (config: MetricRangeConfig) => void
+  getMetricRange: (id: string) => MetricRangeConfig | null
 }
 
 // Sample data for initial state
@@ -313,12 +339,67 @@ const clamp = (value: number, min: number, max: number) => {
   return value
 }
 
-const normalizeValueForEngine = (value: string): string | number | null => {
+const EXCEL_EPOCH_MS = Date.UTC(1899, 11, 30)
+const MS_PER_DAY = 24 * 60 * 60 * 1000
+
+const toExcelSerial = (date: Date): number => {
+  const utc = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+  return Math.round((utc - EXCEL_EPOCH_MS) / MS_PER_DAY)
+}
+
+const serialToDate = (serial: number): Date => {
+  return new Date(EXCEL_EPOCH_MS + serial * MS_PER_DAY)
+}
+
+const parseDateStringToSerial = (value: string): number | null => {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+
+  if (/^\d+$/.test(trimmed)) {
+    const serial = Number(trimmed)
+    if (!Number.isNaN(serial)) {
+      return serial
+    }
+  }
+
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch
+    const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)))
+    if (!Number.isNaN(date.getTime())) {
+      return toExcelSerial(date)
+    }
+  }
+
+  const slashMatch = trimmed.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/)
+  if (slashMatch) {
+    const [, month, day, year] = slashMatch
+    const numericYear = Number(year.length === 2 ? `20${year}` : year)
+    const date = new Date(Date.UTC(numericYear, Number(month) - 1, Number(day)))
+    if (!Number.isNaN(date.getTime())) {
+      return toExcelSerial(date)
+    }
+  }
+
+    const parsed = new Date(trimmed)
+    if (!Number.isNaN(parsed.getTime())) {
+      return toExcelSerial(parsed)
+    }
+
+  return null
+}
+
+const normalizeValueForEngine = (value: string, format?: CellFormat): string | number | null => {
   if (!value) return null
 
   const trimmed = value.trim()
   if (!trimmed) return null
   if (trimmed.startsWith("=")) return trimmed
+
+  const serial = parseDateStringToSerial(trimmed)
+  if (serial !== null) {
+    return serial
+  }
 
   if (trimmed.endsWith("%")) {
     const numeric = Number(trimmed.slice(0, -1).replace(/[$,]/g, ""))
@@ -328,6 +409,63 @@ const normalizeValueForEngine = (value: string): string | number | null => {
   const sanitized = trimmed.replace(/[$,]/g, "")
   const numeric = Number(sanitized)
   return Number.isNaN(numeric) ? value : numeric
+}
+
+const autoCloseFormula = (value: string): string => {
+  if (!value) return value
+
+  const trailingWhitespaceMatch = value.match(/\s*$/)
+  const trailingWhitespace = trailingWhitespaceMatch ? trailingWhitespaceMatch[0] : ""
+  const core = value.slice(0, value.length - trailingWhitespace.length)
+  if (!core.trimStart().startsWith("=")) {
+    return value
+  }
+
+  const stack: string[] = []
+  const opening = new Set(["(", "[", "{"])
+  const closingMap: Record<string, string> = {
+    "(": ")",
+    "[": "]",
+    "{": "}"
+  }
+  const matchingOpen: Record<string, string> = {
+    ")": "(",
+    "]": "[",
+    "}": "{"
+  }
+
+  let inString = false
+  for (let i = 0; i < core.length; i++) {
+    const ch = core[i]
+    if (ch === '"') {
+      const prev = core[i - 1]
+      if (prev !== '\\') {
+        inString = !inString
+      }
+      continue
+    }
+    if (inString) continue
+
+    if (opening.has(ch)) {
+      stack.push(ch)
+    } else if (ch in matchingOpen) {
+      if (stack.length && stack[stack.length - 1] === matchingOpen[ch]) {
+        stack.pop()
+      }
+    }
+  }
+
+  if (stack.length === 0) {
+    return value
+  }
+
+  let result = core
+  while (stack.length) {
+    const opener = stack.pop()!
+    result += closingMap[opener] ?? ''
+  }
+
+  return result + trailingWhitespace
 }
 
 const createInitialGridData = (): CellContent[][] => {
@@ -350,6 +488,8 @@ interface UndoAction {
     col: number
     oldValue: string
     newValue: string
+    oldMetricRangeId?: string | null
+    newMetricRangeId?: string | null
   }>
 }
 
@@ -358,7 +498,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   onCellClick,
   onCellChange,
   onFormulaChange,
-  detectedRanges = []
+  detectedRanges = [],
+  onEditMetricRange,
 }: SpreadsheetGridProps, ref) {
   const initialGrid = useMemo(() => createInitialGridData(), [])
   const [gridData, setGridData] = useState<CellContent[][]>(initialGrid)
@@ -405,6 +546,40 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   const referenceSelectionActiveRef = useRef(false)
   const keyboardReferenceCursorRef = useRef<{ row: number; col: number } | null>(null)
 
+  // Metric cell evaluation state
+  const [metricCells, setMetricCells] = useState<Record<string, MetricEvaluationResult>>({})
+  const metricEvaluationInProgressRef = useRef<Set<string>>(new Set())
+  const [metricRanges, setMetricRanges] = useState<Record<string, MetricRangeConfig>>({})
+  const [hoveredMetricRangeId, setHoveredMetricRangeId] = useState<string | null>(null)
+  const editingSourceRef = useRef<'grid' | 'formulaBar' | null>(null)
+  const updateEngineMetricValue = useCallback(
+    (row: number, col: number, result: MetricEvaluationResult | { value: number | string | null; error: string | null }) => {
+      const hf = hyperFormulaRef.current
+      if (!hf) return
+
+      const address: SimpleCellAddress = { sheet: sheetIdRef.current, row, col }
+
+      try {
+        if ('error' in result && result.error) {
+          hf.setCellContents(address, "#ERROR!")
+          return
+        }
+
+        const value = result.value
+        if (value === null || value === undefined) {
+          hf.setCellContents(address, "")
+        } else if (typeof value === "number") {
+          hf.setCellContents(address, value)
+        } else {
+          hf.setCellContents(address, String(value))
+        }
+      } catch (error) {
+        console.error(`Failed to sync metric value with engine at [${row}, ${col}]`, error)
+      }
+    },
+    []
+  )
+
   const numberFormatter = useMemo(() => {
     return new Intl.NumberFormat("en-US", {
       maximumFractionDigits: 4,
@@ -418,6 +593,17 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       maximumFractionDigits: 2,
     })
   }, [])
+
+  const dateFormatter = useMemo(() => {
+    return new Intl.DateTimeFormat("en-US", {
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      timeZone: "UTC",
+    })
+  }, [])
+
+  const activeMetricRangeId = gridData[activeCell.row]?.[activeCell.col]?.metricRangeId ?? null
 
   const referenceHighlights = useMemo<ReferenceHighlight[]>(() => {
     if (!editingCell) return []
@@ -575,7 +761,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   )
 
   useEffect(() => {
-    const sheetData = initialGrid.map(row => row.map(cell => normalizeValueForEngine(cell.raw)))
+    const sheetData = initialGrid.map(row => row.map(cell => normalizeValueForEngine(cell.raw, cell.format)))
     const hf = HyperFormula.buildFromArray(sheetData, { licenseKey: "gpl-v3" })
 
     hyperFormulaRef.current = hf
@@ -607,8 +793,10 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   // Focus input when editing starts
   useEffect(() => {
     if (editingCell && inputRef.current) {
-      inputRef.current.focus()
-      inputRef.current.select()
+      if (editingSourceRef.current !== 'formulaBar') {
+        inputRef.current.focus()
+        inputRef.current.select()
+      }
     } else {
       const target = cellRefs.current[activeCell.row]?.[activeCell.col]
       target?.focus()
@@ -669,25 +857,128 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     [gridData, numberFormatter, percentFormatter]
   )
 
+  const formatDateValue = useCallback((value: string | number): string | null => {
+    if (value === null || value === undefined || value === "") return null
+    let serial: number | null = null
+    if (typeof value === "number" && Number.isFinite(value)) {
+      serial = value
+    } else if (typeof value === "string") {
+      serial = parseDateStringToSerial(value)
+    }
+    if (serial === null) {
+      return null
+    }
+    return dateFormatter.format(serialToDate(serial))
+  }, [dateFormatter])
+
   const getCellDisplayValue = useCallback(
     (row: number, col: number): string => {
       const rawValue = gridData[row]?.[col]?.raw ?? ""
       if (rawValue.startsWith("=")) {
+        // Check if this is a METRIC formula
+        if (isMetricFormula(rawValue)) {
+          const cellKey = `${row},${col}`
+          const metricResult = metricCells[cellKey]
+
+          if (metricResult) {
+            if (metricResult.loading) {
+              return "Loading..."
+            }
+            if (metricResult.error) {
+              return "#ERROR!"
+            }
+            if (metricResult.value !== null && metricResult.value !== undefined) {
+              // Format the metric value
+              if (typeof metricResult.value === 'number') {
+                return numberFormatter.format(metricResult.value)
+              }
+              return String(metricResult.value)
+            }
+          }
+          return "..."
+        }
+
+        // Regular formula - use HyperFormula
         const engineValue = getEngineValue(row, col)
         return engineValue === null ? "" : formatComputedValue(row, engineValue)
       }
       return rawValue
     },
-    [formatComputedValue, getEngineValue, gridData]
+    [formatComputedValue, getEngineValue, gridData, metricCells, numberFormatter]
   )
 
-  const updateCellValue = useCallback((row: number, col: number, value: string, skipUndo = false) => {
+  // Evaluate metric formulas asynchronously
+  const evaluateMetricCell = useCallback(async (row: number, col: number, formula: string) => {
+    const cellKey = `${row},${col}`
+
+    // Check if already evaluating
+    if (metricEvaluationInProgressRef.current.has(cellKey)) {
+      return
+    }
+
+    // Mark as in progress
+    metricEvaluationInProgressRef.current.add(cellKey)
+
+    // Set loading state
+    setMetricCells(prev => ({
+      ...prev,
+      [cellKey]: { value: null, loading: true, error: null }
+    }))
+    updateEngineMetricValue(row, col, { value: null, error: null })
+
+    try {
+      // Evaluate the metric formula
+      const result = await evaluateMetricFormula(formula, row, col, detectedRanges)
+
+      // Update with result
+      setMetricCells(prev => ({
+        ...prev,
+        [cellKey]: result
+      }))
+      updateEngineMetricValue(row, col, result)
+    } catch (error) {
+      console.error(`Error evaluating metric at [${row}, ${col}]:`, error)
+      setMetricCells(prev => ({
+        ...prev,
+        [cellKey]: {
+          value: null,
+          loading: false,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        }
+      }))
+      updateEngineMetricValue(row, col, { value: null, error: error instanceof Error ? error.message : 'Unknown error' })
+    } finally {
+      // Remove from in-progress set
+      metricEvaluationInProgressRef.current.delete(cellKey)
+    }
+  }, [detectedRanges, updateEngineMetricValue])
+
+  // Evaluate METRIC formulas when grid data or detected ranges change
+  useEffect(() => {
+    // Scan grid for METRIC formulas
+    gridData.forEach((row, rowIdx) => {
+      row.forEach((cell, colIdx) => {
+        const formula = cell.raw
+        if (isMetricFormula(formula)) {
+          // Evaluate this metric cell
+          void evaluateMetricCell(rowIdx, colIdx, formula)
+        }
+      })
+    })
+  }, [gridData, evaluateMetricCell])
+
+  const updateCellValue = useCallback((row: number, col: number, value: string, options: { skipUndo?: boolean; metricRangeId?: string | null } = {}) => {
+    const { skipUndo = false, metricRangeId } = options
+    const autoValue = autoCloseFormula(value)
     const hf = hyperFormulaRef.current
     const address: SimpleCellAddress = { sheet: sheetIdRef.current, row, col }
 
+    const currentCell = gridData[row]?.[col]
+    const currentFormat = currentCell?.format
+    const normalized = normalizeValueForEngine(autoValue, currentFormat)
+
     if (hf) {
       try {
-        const normalized = normalizeValueForEngine(value)
         hf.setCellContents(address, normalized)
       } catch (error) {
         console.error(`HyperFormula setCellContents failed at [${row}, ${col}]:`, error)
@@ -695,15 +986,24 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     }
 
     setGridData(prevData => {
-      const oldValue = prevData[row]?.[col]?.raw ?? ""
+      const prevCell = prevData[row]?.[col]
+      const oldValue = prevCell?.raw ?? ""
+      const oldMetricRangeId = prevCell?.metricRangeId ?? null
+      const newMetricRangeId = metricRangeId !== undefined ? metricRangeId : oldMetricRangeId
 
-      // Add to undo stack if value changed and not skipping undo
-      if (!skipUndo && oldValue !== value) {
+      if (!skipUndo && oldValue !== autoValue) {
         setUndoStack(prev => [...prev, {
           type: 'cell-change',
-          changes: [{ row, col, oldValue, newValue: value }]
+          changes: [{
+            row,
+            col,
+            oldValue,
+            newValue: autoValue,
+            oldMetricRangeId,
+            newMetricRangeId,
+          }]
         }])
-        setRedoStack([]) // Clear redo stack on new change
+        setRedoStack([])
       }
 
       const newData = prevData.map(rowArr => [...rowArr])
@@ -711,17 +1011,77 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         newData[row] = Array.from({ length: columns.length }, () => ({ raw: "" }))
       }
 
-      newData[row][col] = { raw: value }
+      const existingCell = newData[row][col] || { raw: "" }
+      const nextCell: CellContent = {
+        ...existingCell,
+        raw: autoValue,
+      }
+
+      if (metricRangeId !== undefined) {
+        nextCell.metricRangeId = metricRangeId
+      }
+
+      newData[row][col] = nextCell
       return newData
     })
 
     if (onCellChange) {
-      onCellChange(row, col, value)
+      onCellChange(row, col, autoValue)
     }
     if (onFormulaChange && row === activeCell.row && col === activeCell.col) {
-      onFormulaChange(value)
+      onFormulaChange(autoValue)
     }
-  }, [activeCell.col, activeCell.row, onCellChange, onFormulaChange])
+  }, [activeCell.col, activeCell.row, gridData, onCellChange, onFormulaChange])
+
+  const applyMetricRange = useCallback((config: MetricRangeConfig) => {
+    const uniqueSortedColumns = Array.from(new Set(config.columns)).sort((a, b) => a - b)
+    const normalizedRows = config.rows
+      .map(rowConfig => ({
+        ...rowConfig,
+      }))
+      .sort((a, b) => a.row - b.row)
+
+    const normalizedConfig: MetricRangeConfig = {
+      ...config,
+      columns: uniqueSortedColumns,
+      rows: normalizedRows,
+    }
+
+    const previousConfig = metricRanges[normalizedConfig.id]
+    if (previousConfig) {
+      previousConfig.rows.forEach(rowConfig => {
+        if (rowConfig.label !== undefined) {
+          updateCellValue(rowConfig.row, 0, "", { skipUndo: true, metricRangeId: null })
+        }
+        previousConfig.columns.forEach(col => {
+          updateCellValue(rowConfig.row, col, "", { skipUndo: true, metricRangeId: null })
+        })
+      })
+    }
+
+    normalizedRows.forEach(rowConfig => {
+      if (rowConfig.label !== undefined) {
+        updateCellValue(rowConfig.row, 0, rowConfig.label, { skipUndo: true, metricRangeId: normalizedConfig.id })
+      }
+      uniqueSortedColumns.forEach(col => {
+        updateCellValue(rowConfig.row, col, rowConfig.formula, {
+          skipUndo: true,
+          metricRangeId: normalizedConfig.id,
+        })
+      })
+    })
+
+    setMetricRanges(prev => ({
+      ...prev,
+      [normalizedConfig.id]: normalizedConfig,
+    }))
+
+    setHoveredMetricRangeId(normalizedConfig.id)
+  }, [metricRanges, updateCellValue])
+
+  const getMetricRange = useCallback((id: string): MetricRangeConfig | null => {
+    return metricRanges[id] ?? null
+  }, [metricRanges])
 
   const performUndo = useCallback(() => {
     if (undoStack.length === 0) return
@@ -731,8 +1091,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     setRedoStack(prev => [...prev, action])
 
     // Apply the old values
-    action.changes.forEach(({ row, col, oldValue }) => {
-      updateCellValue(row, col, oldValue, true)
+    action.changes.forEach(({ row, col, oldValue, oldMetricRangeId }) => {
+      updateCellValue(row, col, oldValue, { skipUndo: true, metricRangeId: oldMetricRangeId ?? null })
     })
   }, [undoStack, updateCellValue])
 
@@ -744,8 +1104,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     setUndoStack(prev => [...prev, action])
 
     // Apply the new values
-    action.changes.forEach(({ row, col, newValue }) => {
-      updateCellValue(row, col, newValue, true)
+    action.changes.forEach(({ row, col, newValue, newMetricRangeId }) => {
+      updateCellValue(row, col, newValue, { skipUndo: true, metricRangeId: newMetricRangeId ?? null })
     })
   }, [redoStack, updateCellValue])
 
@@ -753,13 +1113,28 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     const envelope = getSelectionEnvelope()
     if (!envelope) return
 
-    const changes: Array<{ row: number; col: number; oldValue: string; newValue: string }> = []
+    const changes: Array<{
+      row: number
+      col: number
+      oldValue: string
+      newValue: string
+      oldMetricRangeId?: string | null
+      newMetricRangeId?: string | null
+    }> = []
 
     for (let row = envelope.start.row; row <= envelope.end.row; row++) {
       for (let col = envelope.start.col; col <= envelope.end.col; col++) {
         const oldValue = gridData[row]?.[col]?.raw ?? ""
+        const oldMetricRangeId = gridData[row]?.[col]?.metricRangeId ?? null
         if (oldValue !== "") {
-          changes.push({ row, col, oldValue, newValue: "" })
+          changes.push({
+            row,
+            col,
+            oldValue,
+            newValue: "",
+            oldMetricRangeId,
+            newMetricRangeId: null,
+          })
         }
       }
     }
@@ -774,7 +1149,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
       // Clear all cells
       changes.forEach(({ row, col }) => {
-        updateCellValue(row, col, "", true)
+        updateCellValue(row, col, "", { skipUndo: true, metricRangeId: null })
       })
     }
   }, [getSelectionEnvelope, gridData, updateCellValue])
@@ -985,7 +1360,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
             )
           }
 
-          updateCellValue(destRow, destCol, value)
+          updateCellValue(destRow, destCol, value, { metricRangeId: null })
         }
       }
 
@@ -1006,7 +1381,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
       for (let row = envelope.start.row; row <= envelope.end.row; row++) {
         for (let col = envelope.start.col; col <= envelope.end.col; col++) {
-          updateCellValue(row, col, "")
+          updateCellValue(row, col, "", { metricRangeId: null })
         }
       }
     },
@@ -1263,6 +1638,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   const handleCellDoubleClick = (row: number, col: number) => {
     const cell = gridData[row]?.[col]
     const value = cell?.raw || ""
+    editingSourceRef.current = 'grid'
     setEditingCell({ row, col })
     setEditValue(value)
   }
@@ -1311,12 +1687,15 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       return
     }
 
-    if (!referenceSelectionActiveRef.current) {
+    if (referenceSelectionActiveRef.current) {
+      event.preventDefault()
+      event.stopPropagation()
+      updateReferenceSelection(row, col)
       return
     }
-    event.preventDefault()
-    event.stopPropagation()
-    updateReferenceSelection(row, col)
+
+    const metricId = gridData[row]?.[col]?.metricRangeId ?? null
+    setHoveredMetricRangeId(prev => (prev === metricId ? prev : metricId))
   }
 
   const applyFormatting = useCallback((format: Partial<CellFormat>) => {
@@ -1495,6 +1874,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         default:
           // Start editing on any character key
           if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+            editingSourceRef.current = 'grid'
             setEditingCell({ row, col })
             setEditValue(e.key)
           }
@@ -1651,8 +2031,9 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     finalizeReferenceSelection()
     setFunctionSuggestions([])
     if (editingCell) {
-      updateCellValue(editingCell.row, editingCell.col, editValue)
+      updateCellValue(editingCell.row, editingCell.col, editValue, { metricRangeId: null })
       setEditingCell(null)
+      editingSourceRef.current = null
     }
   }, [editingCell, editValue, finalizeReferenceSelection, updateCellValue])
 
@@ -1661,13 +2042,16 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     setFunctionSuggestions([])
     setEditingCell(null)
     setEditValue("")
+    editingSourceRef.current = null
   }, [finalizeReferenceSelection])
 
   useImperativeHandle(
     ref,
     () => ({
-      setFormulaDraft: (value: string) => {
+      setFormulaDraft: (value: string, options?: { focusCell?: boolean; source?: 'grid' | 'formulaBar' }) => {
+        const { focusCell = true, source = 'grid' } = options ?? {}
         const target = { row: activeCell.row, col: activeCell.col }
+        editingSourceRef.current = source
         setEditingCell((prev) => {
           if (!prev || prev.row !== target.row || prev.col !== target.col) {
             return target
@@ -1678,21 +2062,32 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         setFunctionSuggestions([])
         computeFunctionSuggestions(value)
         finalizeReferenceSelection()
-        requestAnimationFrame(() => {
-          inputRef.current?.focus()
-          const cursor = value.length
-          inputRef.current?.setSelectionRange(cursor, cursor)
-        })
+        if (focusCell) {
+          requestAnimationFrame(() => {
+            inputRef.current?.focus()
+            const cursor = value.length
+            inputRef.current?.setSelectionRange(cursor, cursor)
+          })
+        }
       },
       commitFormulaDraft: (value: string) => {
         setFunctionSuggestions([])
         finalizeReferenceSelection()
         setEditValue(value)
-        updateCellValue(activeCell.row, activeCell.col, value)
+        updateCellValue(activeCell.row, activeCell.col, value, { metricRangeId: null })
         setEditingCell(null)
+        editingSourceRef.current = null
+      },
+      setCellValue: (row: number, col: number, value: string, options?: { skipUndo?: boolean; metricRangeId?: string | null }) => {
+        finalizeReferenceSelection()
+        setFunctionSuggestions([])
+        setEditingCell(null)
+        updateCellValue(row, col, value, { skipUndo: options?.skipUndo ?? false, metricRangeId: options?.metricRangeId })
+        editingSourceRef.current = null
       },
       cancelFormulaDraft: () => {
         cancelEdit()
+        editingSourceRef.current = null
       },
       toggleReferenceAnchor: () => {
         toggleReferenceAnchors()
@@ -1700,6 +2095,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       applyFormatting,
       getSelectionFormat,
       getGridData: () => gridData,
+      applyMetricRange,
+      getMetricRange,
     }),
     [
       activeCell.col,
@@ -1712,6 +2109,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       applyFormatting,
       getSelectionFormat,
       gridData,
+      applyMetricRange,
+      getMetricRange,
     ]
   )
 
@@ -1720,7 +2119,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   }
 
   return (
-    <div className="relative">
+    <div className="relative" onMouseLeave={() => setHoveredMetricRangeId(null)}>
       {/* Column Headers */}
       <div className="sticky top-0 z-20 flex border-b border-border bg-muted select-none">
         <div className="flex h-8 w-12 shrink-0 items-center justify-center border-r border-border bg-muted" />
@@ -1774,31 +2173,78 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
               const cellData = gridData[rowIdx]?.[colIdx]
               const rawValue = cellData?.raw ?? ""
               const cellFormat = cellData?.format
+              const metricRangeId = cellData?.metricRangeId ?? null
+              const rangeConfig = metricRangeId ? metricRanges[metricRangeId] : undefined
+              const isRowInMetricRange = rangeConfig?.rows.some(r => r.row === rowIdx) ?? false
               const isFormula = rawValue.startsWith("=")
-              const engineValue = isFormula ? getEngineValue(rowIdx, colIdx) : null
+              const isMetric = isMetricFormula(rawValue)
+              const cellKey = `${rowIdx},${colIdx}`
+              const metricResult = metricCells[cellKey]
+              const engineValue = isFormula && !isMetric ? getEngineValue(rowIdx, colIdx) : null
 
-              // Apply number formatting based on cellFormat
-              let displayValue = isFormula ? formatComputedValue(rowIdx, engineValue) : rawValue
-              if (cellFormat?.numberFormat && !isFormula && rawValue) {
-                const numericValue = Number(rawValue.replace(/[,$%]/g, ""))
-                if (!Number.isNaN(numericValue)) {
-                  if (cellFormat.numberFormat === 'currency') {
-                    displayValue = `$${numberFormatter.format(numericValue)}`
-                  } else if (cellFormat.numberFormat === 'percentage') {
-                    displayValue = percentFormatter.format(numericValue / 100)
-                  } else if (cellFormat.numberFormat === 'general') {
-                    displayValue = numberFormatter.format(numericValue)
-                  }
+              // Get the computed value from HyperFormula for consistent formatting
+              const computedValue = isFormula && !isMetric ? engineValue : (isFormula ? null : getEngineValue(rowIdx, colIdx))
+              const wasDateParsed = !isFormula && typeof computedValue === 'number' && parseDateStringToSerial(rawValue) !== null
+
+              let displayValue: string
+              if (isMetric) {
+                if (!metricResult) {
+                  displayValue = "..."
+                } else if (metricResult.loading) {
+                  displayValue = "Loading..."
+                } else if (metricResult.error) {
+                  displayValue = "#ERROR!"
+                } else if (metricResult.value !== null && metricResult.value !== undefined) {
+                  displayValue =
+                    typeof metricResult.value === 'number'
+                      ? numberFormatter.format(metricResult.value)
+                      : String(metricResult.value)
+                } else {
+                  displayValue = ""
                 }
+              } else if (!isFormula && !computedValue) {
+                // No computed value available, show raw
+                displayValue = rawValue
+              } else if (cellFormat?.numberFormat === 'text') {
+                // Explicit text format: show raw value
+                displayValue = rawValue
+              } else if (cellFormat?.numberFormat === 'date' && typeof computedValue === 'number') {
+                // Explicit date format
+                const formatted = formatDateValue(computedValue)
+                displayValue = formatted ?? rawValue
+              } else if (cellFormat?.numberFormat === 'currency' && typeof computedValue === 'number') {
+                displayValue = `$${numberFormatter.format(computedValue)}`
+              } else if (cellFormat?.numberFormat === 'percentage' && typeof computedValue === 'number') {
+                displayValue = percentFormatter.format(computedValue)
+              } else if (cellFormat?.numberFormat === 'general' && typeof computedValue === 'number') {
+                // Explicit general/number format
+                displayValue = numberFormatter.format(computedValue)
+              } else if (wasDateParsed) {
+                // Auto-detected date (no explicit format): format as date (Excel behavior)
+                const formatted = formatDateValue(computedValue as number)
+                displayValue = formatted ?? rawValue
+              } else if (typeof computedValue === 'number') {
+                // Number value without specific format
+                displayValue = formatComputedValue(rowIdx, computedValue)
+              } else if (computedValue instanceof DetailedCellError) {
+                displayValue = computedValue.value ?? computedValue.message ?? "#ERROR!"
+              } else if (computedValue !== null) {
+                displayValue = String(computedValue)
+              } else {
+                displayValue = rawValue
               }
 
               const isActive = activeCell.row === rowIdx && activeCell.col === colIdx
               const isEditing = editingCell?.row === rowIdx && editingCell?.col === colIdx
               const isHeader = colIdx === 0 && rawValue !== ""
               const numericFromFormula = typeof engineValue === "number"
+              const numericFromMetric = isMetric && typeof metricResult?.value === 'number'
+              const hasNumericComputedValue = typeof computedValue === 'number'
               const isNumeric =
                 (!isFormula && rawValue !== "" && /^[\d,]+$/.test(rawValue.replace(/[%$]/g, ""))) ||
-                numericFromFormula
+                numericFromFormula ||
+                numericFromMetric ||
+                hasNumericComputedValue
               const rowHeader = gridData[rowIdx]?.[0]?.raw ?? ""
               const isPercentage = rowHeader.includes("%") || rawValue.includes("%")
               const allHighlights = previewHighlight
@@ -1822,12 +2268,34 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
               const isInDateRange = dateRange !== undefined
               const isNewDateRange = dateRange?.isNew || false
 
+              const metricHighlight =
+                !!rangeConfig &&
+                isRowInMetricRange &&
+                (metricRangeId === activeMetricRangeId || metricRangeId === hoveredMetricRangeId)
+
               const highlightStyle = activeHighlight
                 ? {
                     boxShadow: `inset 0 0 0 2px ${activeHighlight.color}`,
                     backgroundColor: `${activeHighlight.color}1A`,
                   }
                 : undefined
+
+              const combinedStyle: CSSProperties = { width: columnWidths[colIdx], ...highlightStyle }
+              if (metricHighlight) {
+                const metricBoxShadow = "inset 0 0 0 2px rgba(59,130,246,0.35)"
+                combinedStyle.boxShadow = combinedStyle.boxShadow
+                  ? `${combinedStyle.boxShadow}, ${metricBoxShadow}`
+                  : metricBoxShadow
+              }
+
+              const showEditMetric =
+                !!rangeConfig &&
+                onEditMetricRange &&
+                hoveredMetricRangeId === metricRangeId &&
+                rangeConfig.rows[0]?.row === rowIdx &&
+                rangeConfig.columns[0] !== undefined &&
+                colIdx === rangeConfig.columns[0] &&
+                !isEditing
 
               return (
                 <div
@@ -1840,6 +2308,11 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                   }}
                   onMouseDown={(event) => handleCellMouseDown(event, rowIdx, colIdx)}
                   onMouseEnter={(event) => handleCellMouseEnter(event, rowIdx, colIdx)}
+                  onMouseLeave={() => {
+                    if (metricRangeId && hoveredMetricRangeId === metricRangeId) {
+                      setHoveredMetricRangeId(null)
+                    }
+                  }}
                   onDoubleClick={() => handleCellDoubleClick(rowIdx, colIdx)}
                   onKeyDown={(e) => handleCellKeyDown(e, rowIdx, colIdx)}
                   onCopy={handleCopyEvent}
@@ -1855,6 +2328,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                     isPercentage && "text-success",
                     isFormula && "text-primary font-mono",
                     isSelected && !isActive && !activeHighlight && "bg-primary/5",
+                    metricHighlight && "bg-primary/5 outline outline-1 outline-primary/40 outline-offset-[-2px]",
                     // Apply cell formatting
                     cellFormat?.bold && "font-bold",
                     cellFormat?.italic && "italic pr-4",
@@ -1866,7 +2340,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                     isNewDateRange && !isHeader && "shimmer-effect",
                     isInDateRange && !isNewDateRange && !isHeader && "bg-blue-50/30 dark:bg-blue-950/10",
                   )}
-                  style={{ width: columnWidths[colIdx], ...highlightStyle }}
+                  style={combinedStyle}
                 >
                   {isEditing ? (
                     <>
@@ -1912,6 +2386,18 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                     </>
                   ) : (
                     <span className={cn("truncate", cellFormat?.italic && "pr-1")}>{displayValue}</span>
+                  )}
+                  {showEditMetric && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onEditMetricRange?.(rangeConfig)
+                      }}
+                      className="absolute right-1 top-1 rounded-full border border-primary/30 bg-background px-2 py-0.5 text-xs font-medium text-primary shadow-sm hover:bg-primary/10"
+                    >
+                      Edit Metric
+                    </button>
                   )}
                 </div>
               )

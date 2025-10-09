@@ -29,14 +29,24 @@ export function FormulaBar({
   const cellRef = `${String.fromCharCode(65 + activeCell.col)}${activeCell.row + 1}`
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    const navigationKeys = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown", "Tab"])
+    if (navigationKeys.has(event.key)) {
+      event.stopPropagation()
+      if (event.key === "Tab") {
+        event.preventDefault()
+      }
+    }
     if (event.key === "Enter") {
       event.preventDefault()
+      event.stopPropagation()
       onFormulaCommit?.()
     } else if (event.key === "Escape") {
       event.preventDefault()
+      event.stopPropagation()
       onFormulaCancel?.()
     } else if (event.key === "F4") {
       event.preventDefault()
+      event.stopPropagation()
       onFormulaToggleAnchor?.()
     }
   }
