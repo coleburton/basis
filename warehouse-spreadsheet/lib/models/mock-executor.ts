@@ -129,7 +129,7 @@ export class MockQueryExecutor {
   /**
    * Apply simple filters (object of column: value)
    */
-  private applySimpleFilters(data: any[], filters: Record<string, string | number>): any[] {
+  private applySimpleFilters(data: any[], filters: Record<string, string | number | string[]>): any[] {
     return data.filter(row => {
       return Object.entries(filters).every(([column, value]) => {
         const rowValue = row[column];

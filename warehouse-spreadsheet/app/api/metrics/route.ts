@@ -14,7 +14,7 @@ import type { Grain } from '@/types';
  *   grain: 'quarter' | 'month' | 'year' | 'day',
  *   startDate: string (ISO date),
  *   endDate: string (ISO date),
- *   filters?: Record<string, string | number>
+ *   filters?: Record<string, string | number | string[]>
  * }
  */
 export async function POST(request: NextRequest) {
