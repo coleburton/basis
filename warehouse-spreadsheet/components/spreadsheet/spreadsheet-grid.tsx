@@ -72,6 +72,8 @@ export interface SpreadsheetGridHandle {
   setCellValue: (row: number, col: number, value: string, options?: { skipUndo?: boolean; metricRangeId?: string | null }) => void
   applyMetricRange: (config: MetricRangeConfig) => void
   getMetricRange: (id: string) => MetricRangeConfig | null
+  getMetricRanges: () => Record<string, MetricRangeConfig>
+  getMetricCells: () => Record<string, { value: number | string | null; loading: boolean; error: string | null }>
 }
 
 // Sample data for initial state
@@ -355,13 +357,22 @@ const parseDateStringToSerial = (value: string): number | null => {
   const trimmed = value.trim()
   if (!trimmed) return null
 
-  if (/^\d+$/.test(trimmed)) {
+  // Don't parse numeric values (including decimals) as dates
+  // This prevents values like .38, 0.5, 123.45 from being treated as dates
+  if (/^-?\d*\.?\d+$/.test(trimmed)) {
+    return null
+  }
+
+  // Only parse as serial number if it's a large integer (likely a date serial)
+  // Excel date serials are typically > 1000 (dates after ~1902)
+  if (/^\d{5,}$/.test(trimmed)) {
     const serial = Number(trimmed)
-    if (!Number.isNaN(serial)) {
+    if (!Number.isNaN(serial) && serial >= 1000) {
       return serial
     }
   }
 
+  // ISO format: YYYY-MM-DD
   const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
   if (isoMatch) {
     const [, year, month, day] = isoMatch
@@ -371,6 +382,7 @@ const parseDateStringToSerial = (value: string): number | null => {
     }
   }
 
+  // Slash format: MM/DD/YYYY or MM-DD-YYYY
   const slashMatch = trimmed.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/)
   if (slashMatch) {
     const [, month, day, year] = slashMatch
@@ -381,10 +393,8 @@ const parseDateStringToSerial = (value: string): number | null => {
     }
   }
 
-    const parsed = new Date(trimmed)
-    if (!Number.isNaN(parsed.getTime())) {
-      return toExcelSerial(parsed)
-    }
+  // REMOVED: Aggressive fallback new Date() parsing
+  // This was causing decimal numbers and other non-date strings to be parsed as dates
 
   return null
 }
@@ -517,6 +527,19 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   const selectionAnchorRef = useRef<{ row: number; col: number }>({ row: activeCell.row, col: activeCell.col })
   const suppressSelectionSyncRef = useRef(false)
   const selectionDraggingRef = useRef(false)
+
+  // Memoize selected cell lookup for performance
+  const selectedCellsSet = useMemo(() => {
+    const set = new Set<string>()
+    selectedRanges.forEach(range => {
+      for (let row = range.start.row; row <= range.end.row; row++) {
+        for (let col = range.start.col; col <= range.end.col; col++) {
+          set.add(`${row},${col}`)
+        }
+      }
+    })
+    return set
+  }, [selectedRanges])
   const clipboardDataRef = useRef<{
     origin: { row: number; col: number }
     cells: { raw: string; display: string }[][]
@@ -790,7 +813,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     ])
   }, [activeCell.col, activeCell.row])
 
-  // Focus input when editing starts
+  // Focus input when editing starts - optimized with requestIdleCallback
   useEffect(() => {
     if (editingCell && inputRef.current) {
       if (editingSourceRef.current !== 'formulaBar') {
@@ -798,30 +821,38 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
         inputRef.current.select()
       }
     } else {
-      const target = cellRefs.current[activeCell.row]?.[activeCell.col]
-      target?.focus()
+      // Use requestIdleCallback for non-critical focus operations
+      const idleCallback = window.requestIdleCallback ? window.requestIdleCallback(() => {
+        const target = cellRefs.current[activeCell.row]?.[activeCell.col]
+        target?.focus()
+      }) : requestAnimationFrame(() => {
+        const target = cellRefs.current[activeCell.row]?.[activeCell.col]
+        target?.focus()
+      })
+      return () => {
+        if (window.requestIdleCallback) {
+          window.cancelIdleCallback(idleCallback as number)
+        }
+      }
     }
   }, [activeCell, editingCell])
 
-  // Update formula bar when active cell changes
+  // Update formula bar when active cell changes - consolidated
   useEffect(() => {
-    const cell = gridData[activeCell.row]?.[activeCell.col]
-    const cellValue = cell?.raw || ""
-    if (onFormulaChange) {
-      onFormulaChange(cellValue)
-    }
-  }, [activeCell, gridData, onFormulaChange])
+    if (!onFormulaChange) return
 
-  useEffect(() => {
     if (
       editingCell &&
       editingCell.row === activeCell.row &&
-      editingCell.col === activeCell.col &&
-      onFormulaChange
+      editingCell.col === activeCell.col
     ) {
       onFormulaChange(editValue)
+    } else {
+      const cell = gridData[activeCell.row]?.[activeCell.col]
+      const cellValue = cell?.raw || ""
+      onFormulaChange(cellValue)
     }
-  }, [activeCell, editValue, editingCell, onFormulaChange])
+  }, [activeCell, gridData, onFormulaChange, editingCell, editValue])
 
   const getEngineValue = useCallback(
     (row: number, col: number): CellValue | null => {
@@ -1635,15 +1666,15 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     })
   }, [computeFunctionSuggestions])
 
-  const handleCellDoubleClick = (row: number, col: number) => {
+  const handleCellDoubleClick = useCallback((row: number, col: number) => {
     const cell = gridData[row]?.[col]
     const value = cell?.raw || ""
     editingSourceRef.current = 'grid'
     setEditingCell({ row, col })
     setEditValue(value)
-  }
+  }, [gridData])
 
-  const handleCellMouseDown = (event: ReactMouseEvent<HTMLDivElement>, row: number, col: number) => {
+  const handleCellMouseDown = useCallback((event: ReactMouseEvent<HTMLDivElement>, row: number, col: number) => {
     if (editingCell) {
       const currentValue = inputRef.current?.value ?? editValue
       const isFormulaEdit = currentValue.startsWith("=")
@@ -1678,9 +1709,9 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     }
 
     onCellClick({ row, col })
-  }
+  }, [editingCell, editValue, startReferenceSelection, finalizeReferenceSelection, addCellToSelection, extendSelectionTo, selectSingleCell, stopSelectionDragging, onCellClick])
 
-  const handleCellMouseEnter = (event: ReactMouseEvent<HTMLDivElement>, row: number, col: number) => {
+  const handleCellMouseEnter = useCallback((event: ReactMouseEvent<HTMLDivElement>, row: number, col: number) => {
     if (selectionDraggingRef.current && !editingCell) {
       suppressSelectionSyncRef.current = true
       extendSelectionTo(row, col)
@@ -1696,7 +1727,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
     const metricId = gridData[row]?.[col]?.metricRangeId ?? null
     setHoveredMetricRangeId(prev => (prev === metricId ? prev : metricId))
-  }
+  }, [editingCell, extendSelectionTo, updateReferenceSelection, gridData])
 
   const applyFormatting = useCallback((format: Partial<CellFormat>) => {
     const envelope = getSelectionEnvelope()
@@ -1895,7 +1926,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     findEdgeCell,
     getSelectionEnvelope,
     getSelectionFormat,
-    applyFormatting
+    applyFormatting,
+    handleCellDoubleClick
   ])
 
   const handleInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -2097,6 +2129,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       getGridData: () => gridData,
       applyMetricRange,
       getMetricRange,
+      getMetricRanges: () => metricRanges,
+      getMetricCells: () => metricCells,
     }),
     [
       activeCell.col,
@@ -2111,6 +2145,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       gridData,
       applyMetricRange,
       getMetricRange,
+      metricRanges,
+      metricCells,
     ]
   )
 
@@ -2257,7 +2293,8 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                   colIdx >= range.start.col &&
                   colIdx <= range.end.col
               )
-              const isSelected = selectedRanges.some((range) => isCellInRange(range, rowIdx, colIdx))
+              // Optimized selection check using Set lookup instead of iterating ranges
+              const isSelected = selectedCellsSet.has(`${rowIdx},${colIdx}`)
 
               // Check if this cell is in a detected date range (both row and column must match)
               const dateRange = detectedRanges.find(r =>

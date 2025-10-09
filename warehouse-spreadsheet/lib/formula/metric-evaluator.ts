@@ -31,27 +31,42 @@ const cache: MetricCache = {}
  */
 export function parseMetricFormula(formula: string): {
   metricName: string
-  filters?: Record<string, string | number>
+  filters?: Record<string, string | number | string[]>
 } | null {
   // Remove leading = and whitespace
   const normalized = formula.trim().replace(/^=/, '').trim()
 
-  // Match METRIC("name") or METRIC("name", {...})
-  const match = normalized.match(/^METRIC\s*\(\s*"([^"]+)"(?:\s*,\s*(\{[^}]+\}))?\s*\)$/i)
+  // Check if it starts with METRIC(
+  if (!/^METRIC\s*\(/i.test(normalized)) {
+    return null
+  }
 
-  if (!match) return null
+  // Extract content between METRIC( and final )
+  const contentMatch = normalized.match(/^METRIC\s*\((.*)\)\s*$/is)
+  if (!contentMatch) return null
 
-  const metricName = match[1]
-  let filters: Record<string, string | number> = {}
+  const content = contentMatch[1].trim()
 
-  // Parse filters if present
-  if (match[2]) {
+  // Find the first quoted string (metric name)
+  const metricNameMatch = content.match(/^"([^"]+)"/)
+  if (!metricNameMatch) return null
+
+  const metricName = metricNameMatch[1]
+  const afterMetricName = content.slice(metricNameMatch[0].length).trim()
+
+  let filters: Record<string, string | number | string[]> = {}
+
+  // Check if there's a comma followed by a JSON object
+  if (afterMetricName.startsWith(',')) {
+    const jsonString = afterMetricName.slice(1).trim()
+
     try {
       // Convert single quotes to double quotes for JSON parsing
-      const filtersJson = match[2].replace(/'/g, '"')
+      const filtersJson = jsonString.replace(/'/g, '"')
       filters = JSON.parse(filtersJson)
     } catch (error) {
-      console.error('Failed to parse metric filters:', error)
+      console.error('Failed to parse metric filters:', error, 'JSON:', jsonString)
+      return null
     }
   }
 
@@ -152,7 +167,7 @@ function getCacheKey(
   metricName: string,
   startDate: string,
   endDate: string,
-  filters: Record<string, string | number>
+  filters: Record<string, string | number | string[]>
 ): string {
   const filtersStr = JSON.stringify(filters)
   return `${metricName}:${startDate}:${endDate}:${filtersStr}`
@@ -216,11 +231,18 @@ export async function evaluateMetricFormula(
     })
 
     if (!response.ok) {
-      const error = await response.json()
+      let errorMessage = 'Failed to fetch metric'
+      try {
+        const error = await response.json()
+        errorMessage = error.error || errorMessage
+      } catch {
+        // Response wasn't JSON, use the status text
+        errorMessage = `${response.status}: ${response.statusText}`
+      }
       return {
         value: null,
         loading: false,
-        error: error.error || 'Failed to fetch metric',
+        error: errorMessage,
       }
     }
 
