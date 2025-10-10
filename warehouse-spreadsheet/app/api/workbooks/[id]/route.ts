@@ -13,6 +13,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params
+    console.log('[Workbook API] Loading workbook:', id)
     const supabase = getServerSupabaseClient()
 
     // Fetch workbook metadata
@@ -23,6 +24,7 @@ export async function GET(
       .single()
 
     if (workbookError) {
+      console.error('[Workbook API] Workbook query error:', workbookError)
       if (workbookError.code === 'PGRST116') {
         return NextResponse.json(
           { error: 'Workbook not found' },
@@ -32,10 +34,18 @@ export async function GET(
       throw workbookError
     }
 
+    console.log('[Workbook API] Found workbook:', workbook.name)
+
     // Update last_opened_at timestamp
-    await supabase.rpc('update_workbook_last_opened', { workbook_uuid: id })
+    try {
+      await supabase.rpc('update_workbook_last_opened', { workbook_uuid: id })
+    } catch (rpcError) {
+      console.warn('[Workbook API] Failed to update last_opened_at:', rpcError)
+      // Continue anyway - this is not critical
+    }
 
     // Fetch all sheets for this workbook
+    console.log('[Workbook API] Fetching sheets for workbook:', id)
     const { data: sheets, error: sheetsError } = await supabase
       .from('sheets')
       .select('*')
@@ -43,8 +53,11 @@ export async function GET(
       .order('position')
 
     if (sheetsError) {
+      console.error('[Workbook API] Sheets query error:', sheetsError)
       throw sheetsError
     }
+
+    console.log('[Workbook API] Found sheets:', sheets?.length || 0)
 
     // Fetch metric ranges for all sheets
     const sheetIds = sheets.map(s => s.id)
@@ -80,10 +93,12 @@ export async function GET(
         gridData,
         metricRanges: sheetMetricRanges,
         metricCells: {}, // Metric cells will be evaluated on the client
+        detectedRanges: sheet.detected_ranges || [], // Load cached detected ranges
         hyperformulaSheetId: sheet.hyperformula_sheet_id
       }
     })
 
+    console.log('[Workbook API] Returning workbook data with sheets:', sheetsWithGridData.length)
     return NextResponse.json({
       id: workbook.id,
       name: workbook.name,
@@ -93,7 +108,8 @@ export async function GET(
       sheets: sheetsWithGridData
     })
   } catch (error) {
-    console.error('Workbook fetch API error:', error)
+    console.error('[Workbook API] GET Error:', error)
+    console.error('[Workbook API] Error stack:', error instanceof Error ? error.stack : 'No stack')
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
@@ -137,19 +153,30 @@ export async function PUT(
         // Convert dense grid data to sparse format
         const sparse = gridDataToSparse(sheet.gridData as CellContent[][])
 
+        // Prepare update data
+        const updateData: any = {
+          name: sheet.name,
+          cell_data: sparse,
+        }
+
+        if (sheet.hyperformulaSheetId !== undefined) {
+          updateData.hyperformula_sheet_id = sheet.hyperformulaSheetId
+        }
+
+        if (sheet.detectedRanges !== undefined) {
+          updateData.detected_ranges = sheet.detectedRanges
+        }
+
+        console.log('[Workbook API] Updating sheet:', sheet.id, 'with detected_ranges:', sheet.detectedRanges?.length || 0)
+
         // Update sheet
         const { error: sheetError } = await supabase
           .from('sheets')
-          .update({
-            name: sheet.name,
-            cell_data: sparse,
-            ...(sheet.hyperformulaSheetId !== undefined && {
-              hyperformula_sheet_id: sheet.hyperformulaSheetId
-            })
-          })
+          .update(updateData)
           .eq('id', sheet.id)
 
         if (sheetError) {
+          console.error('[Workbook API] Sheet update error:', sheetError)
           throw sheetError
         }
 

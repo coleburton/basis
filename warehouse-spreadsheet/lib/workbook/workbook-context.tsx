@@ -38,12 +38,28 @@ export interface MetricCellResult {
   error: string | null
 }
 
+export interface DetectedDateRange {
+  rowIndex: number
+  startCol: number
+  endCol: number
+  context: {
+    grain: string
+    periods: any[]
+    startPeriod: string
+    endPeriod: string
+    confidence: string
+  }
+  isNew?: boolean
+  detectedAt?: number
+}
+
 export interface Sheet {
   id: string
   name: string
   gridData: CellContent[][]
   metricRanges: Record<string, MetricRangeConfig>
   metricCells: Record<string, MetricCellResult>
+  detectedRanges?: DetectedDateRange[]
   hyperformulaSheetId?: number
 }
 
@@ -68,6 +84,7 @@ export interface WorkbookContextValue {
   updateSheetData: (sheetId: string, gridData: CellContent[][]) => void
   updateSheetMetricRanges: (sheetId: string, metricRanges: Record<string, MetricRangeConfig>) => void
   updateSheetMetricCells: (sheetId: string, metricCells: Record<string, MetricCellResult>) => void
+  updateSheetDetectedRanges: (sheetId: string, detectedRanges: DetectedDateRange[]) => void
   getSheet: (sheetId: string) => Sheet | null
   getSheetByName: (name: string) => Sheet | null
 
@@ -233,6 +250,13 @@ export function WorkbookProvider({
     // Don't mark dirty for metric cell updates - these are calculated values, not user edits
   }, [])
 
+  const updateSheetDetectedRanges = useCallback((sheetId: string, detectedRanges: DetectedDateRange[]) => {
+    setSheets(prev => prev.map(sheet =>
+      sheet.id === sheetId ? { ...sheet, detectedRanges } : sheet
+    ))
+    markDirty()
+  }, [markDirty])
+
   const getSheet = useCallback((sheetId: string): Sheet | null => {
     return sheets.find(s => s.id === sheetId) || null
   }, [sheets])
@@ -283,7 +307,8 @@ export function WorkbookProvider({
             id: sheet.id,
             name: sheet.name,
             gridData: sheet.gridData,
-            metricRanges: sheet.metricRanges,
+            metricRanges: sheet.metricRanges || {},
+            detectedRanges: Array.isArray(sheet.detectedRanges) ? sheet.detectedRanges : [],
             hyperformulaSheetId: sheet.hyperformulaSheetId
           }))
         })
@@ -403,6 +428,7 @@ export function WorkbookProvider({
     updateSheetData,
     updateSheetMetricRanges,
     updateSheetMetricCells,
+    updateSheetDetectedRanges,
     getSheet,
     getSheetByName,
 

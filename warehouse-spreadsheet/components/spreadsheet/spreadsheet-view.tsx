@@ -78,7 +78,7 @@ export function SpreadsheetView() {
   }, [])
 
   // Pass refs down to inner component for date detection
-  const detectRangesCallback = useCallback((sheetId: string) => {
+  const detectRangesCallback = useCallback((sheetId: string, updateSheetDetectedRanges?: (sheetId: string, ranges: any[]) => void) => {
     const gridDataWithDisplay = gridRef.current?.getGridDataWithDisplay()
     if (!gridDataWithDisplay || !sheetId) return
 
@@ -101,6 +101,11 @@ export function SpreadsheetView() {
       detectedRangesBySheetRef.current[sheetId] = newRanges
       setDetectedRanges(newRanges)
 
+      // Persist to database if callback provided
+      if (updateSheetDetectedRanges) {
+        updateSheetDetectedRanges(sheetId, newRanges)
+      }
+
       // Set timeout to mark ranges as not new after 3 seconds
       setTimeout(() => {
         // Update the stored ranges for this sheet
@@ -111,12 +116,51 @@ export function SpreadsheetView() {
 
           // Update state to trigger re-render
           setDetectedRanges(updated)
+
+          // Persist the updated ranges
+          if (updateSheetDetectedRanges) {
+            updateSheetDetectedRanges(sheetId, updated)
+          }
         }
       }, 3000)
     } else {
       // Even if ranges haven't changed, update state in case we switched sheets
       setDetectedRanges(newRanges)
     }
+  }, [])
+
+  // Track which sheets have loaded cached ranges (only use cache once on initial load)
+  const loadedCachedRangesRef = useRef<Set<string>>(new Set())
+
+  // Detect date ranges for a sheet using its gridData directly
+  const detectRangesForSheet = useCallback((sheet: { id: string; gridData: Array<Array<{ raw: string; format?: any }>>; detectedRanges?: any[] }) => {
+    // Use cached ranges only on first load for this sheet
+    const cachedRanges = sheet.detectedRanges
+    const hasLoadedCache = loadedCachedRangesRef.current.has(sheet.id)
+    
+    if (!hasLoadedCache && cachedRanges && cachedRanges.length > 0) {
+      console.log(`[SpreadsheetView] Using cached date ranges for sheet ${sheet.id}`)
+      detectedRangesBySheetRef.current[sheet.id] = cachedRanges
+      loadedCachedRangesRef.current.add(sheet.id)
+      return cachedRanges
+    }
+
+    // After initial load, always detect from grid data
+    console.log(`[SpreadsheetView] Detecting date ranges from grid data for sheet ${sheet.id}`)
+    
+    // Convert grid data to format expected by detectAllDateRanges
+    const gridDataWithDisplay = sheet.gridData.map(row =>
+      row.map(cell => ({ raw: cell.raw, display: cell.raw }))
+    )
+
+    // Get previous ranges for this sheet
+    const previousRanges = detectedRangesBySheetRef.current[sheet.id] || []
+    const newRanges = detectAllDateRanges(gridDataWithDisplay, previousRanges)
+
+    // Store the ranges for this sheet
+    detectedRangesBySheetRef.current[sheet.id] = newRanges
+    
+    return newRanges
   }, [])
 
   const handleGridFormulaChange = (value: string, _sheetId?: string) => {
@@ -273,6 +317,7 @@ export function SpreadsheetView() {
         gridEditingState={gridEditingState}
         onGridEditingStateChange={setGridEditingState}
         detectRangesCallback={detectRangesCallback}
+        detectRangesForSheet={detectRangesForSheet}
       />
     </WorkbookProvider>
   )
@@ -314,12 +359,13 @@ interface SpreadsheetViewInnerProps {
   handleCellClickWrapper: (cell: { row: number; col: number }) => void
   gridEditingState: { isEditing: boolean; isFormula: boolean; sheetId: string | null }
   onGridEditingStateChange: (state: { isEditing: boolean; isFormula: boolean; sheetId: string | null }) => void
-  detectRangesCallback: (sheetId: string) => void
+  detectRangesCallback: (sheetId: string, updateSheetDetectedRanges?: (sheetId: string, ranges: any[]) => void) => void
+  detectRangesForSheet: (sheet: { id: string; gridData: Array<Array<{ raw: string; format?: any }>>; detectedRanges?: any[] }) => any[]
 }
 
 // Inner component that has access to WorkbookContext
 function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
-  const { activeSheet, workbookName, saveStatus, saveWorkbook } = useWorkbook()
+  const { activeSheet, sheets, workbookName, saveStatus, saveWorkbook, updateSheetDetectedRanges } = useWorkbook()
 
   // Get metric ranges from active sheet
   const metricRanges = activeSheet?.metricRanges ?? {}
@@ -357,16 +403,28 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
     gridEditingState,
     onGridEditingStateChange,
     detectRangesCallback,
+    detectRangesForSheet,
   } = props
 
   const isFormulaEditing = gridEditingState.isEditing && gridEditingState.isFormula
 
-  // Detect date ranges for the active sheet
+  // Detect date ranges for ALL sheets when workbook loads
+  // This ensures cross-sheet references work properly
+  useEffect(() => {
+    if (!sheets || sheets.length === 0) return
+
+    console.log('[SpreadsheetView] Detecting date ranges for all sheets on load')
+    sheets.forEach(sheet => {
+      detectRangesForSheet(sheet)
+    })
+  }, [sheets.length, detectRangesForSheet]) // Run when sheets are first loaded
+
+  // Detect date ranges for the active sheet (periodic updates)
   useEffect(() => {
     if (!activeSheet?.id) return
 
     const detectRanges = () => {
-      detectRangesCallback(activeSheet.id)
+      detectRangesCallback(activeSheet.id, updateSheetDetectedRanges)
     }
 
     // Run detection initially
@@ -376,7 +434,7 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
     const interval = setInterval(detectRanges, 2000)
 
     return () => clearInterval(interval)
-  }, [activeSheet?.id, detectRangesCallback])
+  }, [activeSheet?.id, detectRangesCallback, updateSheetDetectedRanges])
 
   const handleSheetMouseDown = useCallback((sheetId: string) => {
     if (isFormulaEditing) {
