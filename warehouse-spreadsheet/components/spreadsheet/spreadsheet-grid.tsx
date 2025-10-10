@@ -430,6 +430,13 @@ const normalizeValueForEngine = (value: string, format?: CellFormat): string | n
 
   const trimmed = value.trim()
   if (!trimmed) return null
+  
+  // Check if it's a METRIC formula - HyperFormula doesn't understand these
+  // They will be evaluated separately and synced to the engine afterwards
+  if (trimmed.startsWith("=") && isMetricFormula(trimmed)) {
+    return null // Don't pass METRIC formulas to HyperFormula
+  }
+  
   if (trimmed.startsWith("=")) return trimmed
 
   const serial = parseDateStringToSerial(trimmed)
@@ -730,6 +737,59 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     })
   }, [activeSheet?.id, sheetMetricCells, updateEngineMetricValue])
 
+  // Track which sheets have been scanned to avoid re-scanning on every render
+  const lastScannedSheetRef = useRef<Set<string>>(new Set())
+
+  // Scan and evaluate all METRIC formulas when workbook/sheet loads
+  useEffect(() => {
+    if (!activeSheet || !gridData) return
+
+    // Wait for detectedRanges to be available before evaluating metrics
+    // This prevents "No time context found" errors
+    if (!detectedRanges || detectedRanges.length === 0) {
+      console.log('[Grid] Waiting for date ranges to be detected before evaluating metrics...')
+      return
+    }
+
+    // Only scan if we haven't scanned this sheet yet in this session
+    if (lastScannedSheetRef.current.has(activeSheet.id)) {
+      return
+    }
+
+    console.log('[Grid] Date ranges detected, scanning for METRIC formulas to evaluate...')
+    lastScannedSheetRef.current.add(activeSheet.id)
+    
+    // Scan all cells for METRIC formulas and evaluate them
+    gridData.forEach((row, rowIndex) => {
+      row.forEach((cell, colIndex) => {
+        const formula = cell?.raw
+        if (formula && isMetricFormula(formula)) {
+          const cellKey = `${rowIndex},${colIndex}`
+          
+          // Check if we already have a cached value for this cell
+          const cachedResult = sheetMetricCells[cellKey]
+          
+          // Only re-evaluate if no cached result or cached result is invalid
+          const needsEvaluation = !cachedResult || 
+                                  cachedResult.error || 
+                                  cachedResult.value === null || 
+                                  cachedResult.value === undefined
+          
+          if (needsEvaluation) {
+            console.log(`[Grid] Found METRIC formula at [${rowIndex},${colIndex}], triggering evaluation`)
+            // Delay evaluation slightly to avoid blocking the UI
+            setTimeout(() => {
+              void evaluateMetricCell(rowIndex, colIndex, formula)
+            }, 0)
+          } else {
+            console.log(`[Grid] Skipping evaluation for [${rowIndex},${colIndex}], using cached value:`, cachedResult.value)
+          }
+        }
+      })
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSheet?.id, detectedRanges.length]) // Re-run when sheet changes OR when date ranges are first detected
+
   const numberFormatter = useMemo(() => {
     return new Intl.NumberFormat("en-US", {
       maximumFractionDigits: 4,
@@ -944,6 +1004,34 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
     const availableFunctions = hf.getRegisteredFunctionNames().sort()
     setFunctionNames(availableFunctions)
+
+    // Immediately sync all cached metric values to HyperFormula
+    // This ensures cells with METRIC formulas can be referenced by other formulas
+    sheets.forEach(sheet => {
+      const metricCellsForSheet = sheet.metricCells || {}
+      const hfSheetId = sheetIdMap.get(sheet.id)
+      if (typeof hfSheetId === 'number') {
+        Object.entries(metricCellsForSheet).forEach(([cellKey, result]) => {
+          if (!result.error && result.value !== null && result.value !== undefined) {
+            const [rowStr, colStr] = cellKey.split(',')
+            const row = parseInt(rowStr, 10)
+            const col = parseInt(colStr, 10)
+            if (!isNaN(row) && !isNaN(col)) {
+              const address: SimpleCellAddress = { sheet: hfSheetId, row, col }
+              try {
+                if (typeof result.value === "number") {
+                  hf.setCellContents(address, result.value)
+                } else {
+                  hf.setCellContents(address, String(result.value))
+                }
+              } catch (error) {
+                console.error(`Failed to sync metric value at [${row}, ${col}] during init:`, error)
+              }
+            }
+          }
+        })
+      }
+    })
 
     return () => {
       hf.destroy()
