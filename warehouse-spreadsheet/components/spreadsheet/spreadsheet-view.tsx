@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Database, ChevronLeft, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { detectAllDateRanges, type DetectedDateRange } from "@/lib/date-detection"
-import { WorkbookProvider, useWorkbook, type MetricCellResult } from "@/lib/workbook/workbook-context"
+import { useWorkbook, type MetricCellResult } from "@/lib/workbook/workbook-context"
 
 interface CellFormat {
   bold?: boolean
@@ -21,7 +21,13 @@ interface CellFormat {
   numberFormat?: 'general' | 'currency' | 'percentage' | 'text' | 'date'
 }
 
-export function SpreadsheetView() {
+interface SpreadsheetViewProps {
+  workbookId?: string
+}
+
+export function SpreadsheetView({ workbookId }: SpreadsheetViewProps = {}) {
+  const { saveWorkbookData, hasUnsavedChanges } = useWorkbook()
+  const [saving, setSaving] = useState(false)
   const [activeCell, setActiveCell] = useState({ row: 0, col: 0 })
   const [formula, setFormula] = useState("")
   const [isInsertMetricOpen, setIsInsertMetricOpen] = useState(false)
@@ -35,6 +41,21 @@ export function SpreadsheetView() {
     isFormula: false,
     sheetId: null,
   })
+
+  // Manual save function
+  const handleSave = async () => {
+    if (!workbookId || !saveWorkbookData) return
+    
+    setSaving(true)
+    try {
+      await saveWorkbookData(workbookId)
+      console.log('[SpreadsheetView] ✅ Saved successfully')
+    } catch (error) {
+      console.error('[SpreadsheetView] Save error:', error)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   const gridRef = useRef<SpreadsheetGridHandle>(null)
   const formulaUpdateFromGrid = useRef(false)
@@ -221,45 +242,51 @@ export function SpreadsheetView() {
   }, [])
 
   return (
-    <WorkbookProvider>
-      <SpreadsheetViewInner
-        formula={formula}
-        activeCell={activeCell}
-        isInsertMetricOpen={isInsertMetricOpen}
-        isMetricsCollapsed={isMetricsCollapsed}
-        currentFormat={currentFormat}
-        detectedRanges={detectedRanges}
-        editingMetricRange={editingMetricRange}
-        metricCells={metricCells}
-        gridRef={gridRef}
-        setIsInsertMetricOpen={setIsInsertMetricOpen}
-        setIsMetricsCollapsed={setIsMetricsCollapsed}
-        setEditingMetricRange={setEditingMetricRange}
-        setActiveCell={setActiveCell}
-        handleGridFormulaChange={wrappedHandleGridFormulaChange}
-        handleFormulaInputChange={handleFormulaInputChange}
-        handleFormulaCommit={handleFormulaCommit}
-        handleFormulaCancel={handleFormulaCancel}
-        handleFormulaFocus={handleFormulaFocus}
-        handleFormulaToggleAnchor={handleFormulaToggleAnchor}
-        handleCellChange={handleCellChange}
-        handleEditMetricRange={handleEditMetricRange}
-        handleNavigateToMetric={handleNavigateToMetric}
-        handleBold={handleBold}
-        handleItalic={handleItalic}
-        handleUnderline={handleUnderline}
-        handleAlign={handleAlign}
-        handleNumberFormat={handleNumberFormat}
-        updateCurrentFormat={updateCurrentFormat}
-        handleCellClickWrapper={handleCellClickWrapper}
-        gridEditingState={gridEditingState}
-        onGridEditingStateChange={setGridEditingState}
-      />
-    </WorkbookProvider>
+    <SpreadsheetViewInner
+      workbookId={workbookId}
+      saving={saving}
+      hasUnsavedChanges={hasUnsavedChanges}
+      handleSave={handleSave}
+      formula={formula}
+      activeCell={activeCell}
+      isInsertMetricOpen={isInsertMetricOpen}
+      isMetricsCollapsed={isMetricsCollapsed}
+      currentFormat={currentFormat}
+      detectedRanges={detectedRanges}
+      editingMetricRange={editingMetricRange}
+      metricCells={metricCells}
+      gridRef={gridRef}
+      setIsInsertMetricOpen={setIsInsertMetricOpen}
+      setIsMetricsCollapsed={setIsMetricsCollapsed}
+      setEditingMetricRange={setEditingMetricRange}
+      setActiveCell={setActiveCell}
+      handleGridFormulaChange={wrappedHandleGridFormulaChange}
+      handleFormulaInputChange={handleFormulaInputChange}
+      handleFormulaCommit={handleFormulaCommit}
+      handleFormulaCancel={handleFormulaCancel}
+      handleFormulaFocus={handleFormulaFocus}
+      handleFormulaToggleAnchor={handleFormulaToggleAnchor}
+      handleCellChange={handleCellChange}
+      handleEditMetricRange={handleEditMetricRange}
+      handleNavigateToMetric={handleNavigateToMetric}
+      handleBold={handleBold}
+      handleItalic={handleItalic}
+      handleUnderline={handleUnderline}
+      handleAlign={handleAlign}
+      handleNumberFormat={handleNumberFormat}
+      updateCurrentFormat={updateCurrentFormat}
+      handleCellClickWrapper={handleCellClickWrapper}
+      gridEditingState={gridEditingState}
+      onGridEditingStateChange={setGridEditingState}
+    />
   )
 }
 
 interface SpreadsheetViewInnerProps {
+  workbookId?: string
+  saving: boolean
+  hasUnsavedChanges: boolean
+  handleSave: () => void
   formula: string
   activeCell: { row: number; col: number }
   isInsertMetricOpen: boolean
@@ -295,6 +322,7 @@ interface SpreadsheetViewInnerProps {
 
 // Inner component that has access to WorkbookContext
 function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
+  const { workbookId, saving, hasUnsavedChanges, handleSave } = props
   const { activeSheet } = useWorkbook()
   
   // Get metric ranges from active sheet
@@ -345,18 +373,24 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
   return (
     <div className="flex h-screen flex-col bg-background">
       {/* Top Toolbar */}
-      <SpreadsheetToolbar
-        onInsertMetric={() => {
-          setEditingMetricRange(null)
-          setIsInsertMetricOpen(true)
-        }}
-        onBold={handleBold}
-        onItalic={handleItalic}
-        onUnderline={handleUnderline}
-        onAlign={handleAlign}
-        onNumberFormat={handleNumberFormat}
-        currentFormat={currentFormat}
-      />
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
+        <SpreadsheetToolbar
+          workbookId={workbookId}
+          saving={saving}
+          hasUnsavedChanges={hasUnsavedChanges}
+          onSave={handleSave}
+          onInsertMetric={() => {
+            setEditingMetricRange(null)
+            setIsInsertMetricOpen(true)
+          }}
+          onBold={handleBold}
+          onItalic={handleItalic}
+          onUnderline={handleUnderline}
+          onAlign={handleAlign}
+          onNumberFormat={handleNumberFormat}
+          currentFormat={currentFormat}
+        />
+      </div>
 
       {/* Formula Bar */}
       <FormulaBar

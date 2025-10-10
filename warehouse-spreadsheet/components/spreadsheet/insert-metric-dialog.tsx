@@ -34,57 +34,14 @@ interface InsertMetricDialogProps {
   onClearEditingRange?: () => void
 }
 
-// Mock metrics surfaced in the insert dialog. These mimic the definitions in lib/models/registry.ts.
-const SAMPLE_MODELS = [
-  {
-    id: "new_users",
-    name: "New Users",
-    description: "Count of new user registrations in the selected period",
-    dimensions: ["region", "channel", "plan_type"],
-    granularity: ["month", "quarter", "year"],
-    lastRefresh: "Mock data • just now",
-  },
-  {
-    id: "active_users",
-    name: "Active Users",
-    description: "Distinct active users (status = active) over time",
-    dimensions: ["region", "channel", "plan_type"],
-    granularity: ["month", "quarter", "year"],
-    lastRefresh: "Mock data • just now",
-  },
-  {
-    id: "total_revenue",
-    name: "Total Revenue",
-    description: "Sum of revenue transactions for the selected period",
-    dimensions: ["product", "region", "channel"],
-    granularity: ["month", "quarter", "year"],
-    lastRefresh: "Mock data • just now",
-  },
-  {
-    id: "expenses",
-    name: "Operating Expenses",
-    description: "Operating expenses by department",
-    dimensions: ["department", "expense_type"],
-    granularity: ["month", "quarter", "year"],
-    lastRefresh: "1 hour ago",
-  },
-  {
-    id: "headcount",
-    name: "Headcount",
-    description: "Employee headcount by department and level",
-    dimensions: ["department", "level", "location"],
-    granularity: ["month", "quarter"],
-    lastRefresh: "3 hours ago",
-  },
-  {
-    id: "arr",
-    name: "Annual Recurring Revenue",
-    description: "ARR by customer segment",
-    dimensions: ["segment", "plan_type"],
-    granularity: ["month", "quarter", "year"],
-    lastRefresh: "30 minutes ago",
-  },
-]
+interface MetricModel {
+  id: string
+  name: string
+  description: string
+  dimensions: string[]
+  granularity: string[]
+  lastRefresh: string
+}
 
 const DIMENSION_VALUES = {
   product: ["SaaS Platform", "Enterprise", "API Access", "Professional Services"],
@@ -141,7 +98,41 @@ export function InsertMetricDialog({
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [dimensionConfigs, setDimensionConfigs] = useState<Record<string, DimensionConfig>>({})
   const [selectedPeriod, setSelectedPeriod] = useState("month")
+  const [metrics, setMetrics] = useState<MetricModel[]>([])
+  const [loadingMetrics, setLoadingMetrics] = useState(true)
   const isEditing = editingRange !== null
+
+  // Load metrics from API
+  useEffect(() => {
+    const loadMetrics = async () => {
+      try {
+        setLoadingMetrics(true)
+        const response = await fetch('/api/metrics')
+        const data = await response.json()
+        
+        // Transform API metrics to our format
+        const transformedMetrics: MetricModel[] = (data.metrics || []).map((m: any) => ({
+          id: m.name,
+          name: m.display_name || m.name,
+          description: m.description || `Measure from ${m.model_name} model`,
+          dimensions: m.dimensions || [], // Dimensions from the model
+          granularity: ['day', 'month', 'quarter', 'year'],
+          lastRefresh: 'Just now',
+        }))
+        
+        setMetrics(transformedMetrics)
+      } catch (error) {
+        console.error('Failed to load metrics:', error)
+        setMetrics([])
+      } finally {
+        setLoadingMetrics(false)
+      }
+    }
+
+    if (open) {
+      loadMetrics()
+    }
+  }, [open])
 
   const closeDialog = () => {
     onOpenChange(false)
@@ -202,13 +193,13 @@ export function InsertMetricDialog({
     }
   }, [open, editingRange, onClearEditingRange])
 
-  const filteredModels = SAMPLE_MODELS.filter(
+  const filteredModels = metrics.filter(
     (model) =>
       model.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       model.description.toLowerCase().includes(searchQuery.toLowerCase()),
   )
 
-  const currentModel = SAMPLE_MODELS.find((m) => m.id === selectedModel)
+  const currentModel = metrics.find((m) => m.id === selectedModel)
 
   const setDimensionMode = (dimension: string, mode: DimensionMode) => {
     setDimensionConfigs((prev) => {
@@ -489,7 +480,18 @@ export function InsertMetricDialog({
             </div>
 
             <div className="flex-1 space-y-2 overflow-y-auto rounded-md border border-border p-2">
-              {filteredModels.map((model) => (
+              {loadingMetrics ? (
+                <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+                  Loading metrics...
+                </div>
+              ) : filteredModels.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center text-sm text-muted-foreground">
+                  <Database className="h-8 w-8 mb-2 opacity-50" />
+                  <p>No metrics found.</p>
+                  <p className="text-xs mt-1">Create models in the Models page first.</p>
+                </div>
+              ) : (
+                filteredModels.map((model) => (
                 <button
                   key={model.id}
                   onClick={() => setSelectedModel(model.id)}
@@ -520,7 +522,8 @@ export function InsertMetricDialog({
                     {selectedModel === model.id && <Check className="h-4 w-4 text-primary flex-shrink-0" />}
                   </div>
                 </button>
-              ))}
+                ))
+              )}
             </div>
           </div>
 

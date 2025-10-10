@@ -1,11 +1,11 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Search, Plus, Table2, Clock, User, MoreVertical, Copy, Trash2, FileText, Star, StarOff } from "lucide-react"
+import { Search, Plus, Table2, Clock, User, MoreVertical, Copy, Trash2, FileText, Star, StarOff, RefreshCw } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,77 +24,103 @@ import {
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 
-const workbooks = [
-  {
-    id: 1,
-    name: "Q1 2024 Financial Model",
-    description: "Quarterly financial planning and analysis",
-    lastModified: "2 hours ago",
-    author: "Sarah Chen",
-    starred: true,
-    scenarios: 3,
-  },
-  {
-    id: 2,
-    name: "Annual Budget Planning",
-    description: "Full year budget with department breakdowns",
-    lastModified: "1 day ago",
-    author: "Mike Johnson",
-    starred: true,
-    scenarios: 5,
-  },
-  {
-    id: 3,
-    name: "Revenue Forecast 2024",
-    description: "Sales pipeline and revenue projections",
-    lastModified: "3 days ago",
-    author: "Sarah Chen",
-    starred: false,
-    scenarios: 2,
-  },
-  {
-    id: 4,
-    name: "Executive Dashboard",
-    description: "High-level KPIs and metrics for leadership",
-    lastModified: "5 days ago",
-    author: "Alex Kim",
-    starred: false,
-    scenarios: 1,
-  },
-  {
-    id: 5,
-    name: "Product Profitability Analysis",
-    description: "Margin analysis by product line",
-    lastModified: "1 week ago",
-    author: "Mike Johnson",
-    starred: false,
-    scenarios: 4,
-  },
-  {
-    id: 6,
-    name: "Customer Cohort Analysis",
-    description: "Retention and LTV metrics by cohort",
-    lastModified: "2 weeks ago",
-    author: "Alex Kim",
-    starred: false,
-    scenarios: 2,
-  },
-]
+interface Workbook {
+  id: string
+  name: string
+  org_id: string
+  created_by: string
+  created_at: string
+  updated_at: string
+}
 
 export function WorkbooksView() {
   const [searchQuery, setSearchQuery] = useState("")
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
   const [newWorkbookName, setNewWorkbookName] = useState("")
   const [newWorkbookDescription, setNewWorkbookDescription] = useState("")
+  const [workbooks, setWorkbooks] = useState<Workbook[]>([])
+  const [loading, setLoading] = useState(true)
+  const [creating, setCreating] = useState(false)
 
-  const filteredWorkbooks = workbooks.filter(
-    (workbook) =>
-      workbook.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      workbook.description.toLowerCase().includes(searchQuery.toLowerCase()),
+  // Load workbooks from API
+  useEffect(() => {
+    loadWorkbooks()
+  }, [])
+
+  const loadWorkbooks = async () => {
+    try {
+      setLoading(true)
+      const response = await fetch('/api/workbooks')
+      const data = await response.json()
+      setWorkbooks(data.workbooks || [])
+    } catch (error) {
+      console.error('Failed to load workbooks:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleCreateWorkbook = async () => {
+    if (!newWorkbookName.trim()) return
+
+    try {
+      setCreating(true)
+      const response = await fetch('/api/workbooks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newWorkbookName,
+          org_id: 'default_org',
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to create workbook')
+      }
+
+      // Success! Reload workbooks and close dialog
+      await loadWorkbooks()
+      setIsCreateDialogOpen(false)
+      setNewWorkbookName("")
+      setNewWorkbookDescription("")
+    } catch (error) {
+      console.error('Failed to create workbook:', error)
+      alert('Failed to create workbook')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const formatDate = (dateStr: string) => {
+    const date = new Date(dateStr)
+    const now = new Date()
+    const diff = now.getTime() - date.getTime()
+    const hours = Math.floor(diff / (1000 * 60 * 60))
+    const days = Math.floor(hours / 24)
+    
+    if (days > 7) {
+      const weeks = Math.floor(days / 7)
+      return `${weeks} week${weeks > 1 ? 's' : ''} ago`
+    }
+    if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`
+    if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`
+    return 'Just now'
+  }
+
+  const filteredWorkbooks = workbooks.filter((workbook) =>
+    workbook.name.toLowerCase().includes(searchQuery.toLowerCase())
   )
 
-  const starredWorkbooks = filteredWorkbooks.filter((w) => w.starred)
-  const otherWorkbooks = filteredWorkbooks.filter((w) => !w.starred)
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <div className="text-center">
+          <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-2 text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">Loading workbooks...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -172,41 +198,41 @@ export function WorkbooksView() {
                   </div>
                 </div>
                 <DialogFooter>
-                  <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>
+                  <Button 
+                    variant="outline" 
+                    onClick={() => setIsCreateDialogOpen(false)}
+                    disabled={creating}
+                  >
                     Cancel
                   </Button>
-                  <Button onClick={() => setIsCreateDialogOpen(false)}>Create Workbook</Button>
+                  <Button 
+                    onClick={handleCreateWorkbook}
+                    disabled={creating || !newWorkbookName.trim()}
+                  >
+                    {creating ? 'Creating...' : 'Create Workbook'}
+                  </Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
           </div>
 
-          {/* Starred Workbooks */}
-          {starredWorkbooks.length > 0 && (
-            <div className="mb-8">
-              <h3 className="mb-4 flex items-center gap-2 font-sans text-lg font-semibold text-foreground">
-                <Star className="h-4 w-4 fill-warning text-warning" />
-                Starred
+          {/* All Workbooks */}
+          {filteredWorkbooks.length > 0 && (
+            <div>
+              <h3 className="mb-4 font-sans text-lg font-semibold text-foreground">
+                Your Workbooks
               </h3>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {starredWorkbooks.map((workbook) => (
-                  <WorkbookCard key={workbook.id} workbook={workbook} />
+                {filteredWorkbooks.map((workbook) => (
+                  <WorkbookCard 
+                    key={workbook.id} 
+                    workbook={workbook}
+                    formatDate={formatDate}
+                  />
                 ))}
               </div>
             </div>
           )}
-
-          {/* All Workbooks */}
-          <div>
-            <h3 className="mb-4 font-sans text-lg font-semibold text-foreground">
-              {starredWorkbooks.length > 0 ? "All Workbooks" : "Your Workbooks"}
-            </h3>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {otherWorkbooks.map((workbook) => (
-                <WorkbookCard key={workbook.id} workbook={workbook} />
-              ))}
-            </div>
-          </div>
 
           {filteredWorkbooks.length === 0 && (
             <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -229,18 +255,26 @@ export function WorkbooksView() {
   )
 }
 
-function WorkbookCard({ workbook }: { workbook: (typeof workbooks)[0] }) {
+function WorkbookCard({ 
+  workbook, 
+  formatDate 
+}: { 
+  workbook: Workbook
+  formatDate: (date: string) => string
+}) {
   return (
     <Card className="group transition-shadow hover:shadow-md">
       <CardHeader>
         <div className="flex items-start justify-between">
           <div className="flex-1">
             <CardTitle className="mb-1 text-base">
-              <a href="/workbook" className="hover:text-primary">
+              <a href={`/workbook?id=${workbook.id}`} className="hover:text-primary">
                 {workbook.name}
               </a>
             </CardTitle>
-            <CardDescription className="text-xs">{workbook.description}</CardDescription>
+            <CardDescription className="text-xs">
+              Created {formatDate(workbook.created_at)}
+            </CardDescription>
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -249,22 +283,11 @@ function WorkbookCard({ workbook }: { workbook: (typeof workbooks)[0] }) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem>
-                <FileText className="mr-2 h-4 w-4" />
-                Open
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                {workbook.starred ? (
-                  <>
-                    <StarOff className="mr-2 h-4 w-4" />
-                    Unstar
-                  </>
-                ) : (
-                  <>
-                    <Star className="mr-2 h-4 w-4" />
-                    Star
-                  </>
-                )}
+              <DropdownMenuItem asChild>
+                <a href={`/workbook?id=${workbook.id}`}>
+                  <FileText className="mr-2 h-4 w-4" />
+                  Open
+                </a>
               </DropdownMenuItem>
               <DropdownMenuItem>
                 <Copy className="mr-2 h-4 w-4" />
@@ -283,18 +306,9 @@ function WorkbookCard({ workbook }: { workbook: (typeof workbooks)[0] }) {
         <div className="space-y-2">
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
             <div className="flex items-center gap-1.5">
-              <User className="h-3.5 w-3.5" />
-              <span>{workbook.author}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
               <Clock className="h-3.5 w-3.5" />
-              <span>{workbook.lastModified}</span>
+              <span>Modified {formatDate(workbook.updated_at)}</span>
             </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="text-xs">
-              {workbook.scenarios} scenario{workbook.scenarios !== 1 ? "s" : ""}
-            </Badge>
           </div>
         </div>
       </CardContent>

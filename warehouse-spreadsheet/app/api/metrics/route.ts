@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getModel, getMetric } from '@/lib/models/registry';
-import { getMockExecutor } from '@/lib/models/mock-executor';
+import { getServerSupabaseClient } from '@/lib/supabase/client';
+import { getMetricEvaluator } from '@/lib/metrics/evaluator';
 import type { Grain } from '@/types';
 
 /**
@@ -14,68 +14,112 @@ import type { Grain } from '@/types';
  *   grain: 'quarter' | 'month' | 'year' | 'day',
  *   startDate: string (ISO date),
  *   endDate: string (ISO date),
- *   filters?: Record<string, string | number | string[]>
+ *   dimensions?: Record<string, string | string[]>
  * }
  */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { metricName, grain, startDate, endDate, filters } = body;
+    const { metricName, grain, startDate, endDate, dimensions } = body;
+
+    console.log(`[Metrics API] Request for metric: ${metricName}`, {
+      grain,
+      startDate,
+      endDate,
+      dimensions
+    });
 
     // Validate inputs
     if (!metricName || !grain || !startDate || !endDate) {
+      console.error('[Metrics API] Missing required fields');
       return NextResponse.json(
         { error: 'Missing required fields: metricName, grain, startDate, endDate' },
         { status: 400 }
       );
     }
 
-    // Get metric and model
-    const metric = getMetric(metricName);
-    if (!metric) {
-      return NextResponse.json(
-        { error: `Unknown metric: ${metricName}` },
-        { status: 404 }
-      );
+    const orgId = process.env.NEXT_PUBLIC_ORG_ID || 'default_org';
+    const supabase = getServerSupabaseClient();
+
+    // Find which model has this measure
+    console.log('[Metrics API] Looking for model with measure:', metricName);
+    const { data: models, error: modelsError } = await supabase
+      .from('models_catalog')
+      .select('id, name, measure_columns')
+      .eq('org_id', orgId);
+
+    if (modelsError) {
+      console.error('[Metrics API] Error fetching models:', modelsError);
+      throw modelsError;
     }
 
-    const model = getModel(metric.model_id.replace('model_', ''));
+    console.log(`[Metrics API] Found ${models?.length || 0} models`);
+
+    // Find the model that contains this metric (measure)
+    const model = models?.find(m => 
+      (m.measure_columns || []).includes(metricName)
+    );
+
     if (!model) {
+      console.error(`[Metrics API] No model found with measure: ${metricName}`);
+      console.error(`[Metrics API] Available models and their measures:`, 
+        models?.map(m => ({ name: m.name, measures: m.measure_columns }))
+      );
       return NextResponse.json(
-        { error: `Model not found for metric: ${metricName}` },
+        { error: `Unknown metric: ${metricName}. No model found with this measure. Make sure the model is created and has been refreshed.` },
         { status: 404 }
       );
     }
 
-    // Execute query using mock data (replace with real Snowflake later)
-    const executor = getMockExecutor();
-    const value = await executor.executeMetricQuery(model, metric, {
-      grain,
+    console.log(`[Metrics API] Found model: ${model.name} (${model.id})`);
+
+    // Build metric definition from model
+    const metricDef = {
+      id: metricName,
+      org_id: orgId,
+      model_id: model.id,
+      name: metricName,
+      display_name: metricName.split('_').map(w => 
+        w.charAt(0).toUpperCase() + w.slice(1)
+      ).join(' '),
+      measure_column: metricName,
+      aggregation: 'sum' as const, // Models pre-aggregate, so we sum across days
+      filters: [],
+      format_type: 'number' as const,
+    };
+
+    // Evaluate metric using materialized data
+    console.log('[Metrics API] Evaluating metric...');
+    const evaluator = getMetricEvaluator();
+    const result = await evaluator.evaluate(metricDef, {
       startDate,
       endDate,
-      dimensionFilters: filters,
+      grain,
+      dimensions,
     });
+
+    console.log(`[Metrics API] ✅ Result: value=${result.value}, rows_scanned=${result.rowsScanned}`);
 
     return NextResponse.json({
       metric: metricName,
-      display_name: metric.display_name,
-      value,
+      display_name: metricDef.display_name,
+      value: result.value,
       grain,
       period: {
         start: startDate,
         end: endDate,
       },
       format: {
-        type: metric.format_type || 'number',
-        currency: metric.currency_code,
+        type: 'number',
       },
       cached: false,
-      source: 'mock_data', // Change to 'snowflake' when using real data
+      source: 'materialized',
+      rows_scanned: result.rowsScanned,
     });
   } catch (error) {
-    console.error('Metrics API error:', error);
+    console.error('[Metrics API] ❌ Error:', error);
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
     );
   }
@@ -84,19 +128,55 @@ export async function POST(request: NextRequest) {
 /**
  * GET /api/metrics
  *
- * List all available metrics
+ * List all available metrics (derived from model measures)
  */
 export async function GET() {
-  const { listMetrics } = await import('@/lib/models/registry');
-  const metrics = listMetrics();
+  try {
+    const orgId = process.env.NEXT_PUBLIC_ORG_ID || 'default_org';
+    const supabase = getServerSupabaseClient();
 
-  return NextResponse.json({
-    metrics: metrics.map(m => ({
-      name: m.name,
-      display_name: m.display_name,
-      description: m.description,
-      format_type: m.format_type,
-      aggregation: m.aggregation,
-    })),
-  });
+    // Get all models with their measures
+    const { data: models, error } = await supabase
+      .from('models_catalog')
+      .select('id, name, measure_columns, dimension_columns')
+      .eq('org_id', orgId);
+
+    if (error) {
+      throw error;
+    }
+
+    // Transform model measures into metrics
+    const metrics: any[] = [];
+    for (const model of models || []) {
+      const measureColumns = model.measure_columns || [];
+      const dimensionColumns = model.dimension_columns || [];
+      
+      for (const measure of measureColumns) {
+        metrics.push({
+          id: measure, // Use measure name as metric ID
+          name: measure,
+          display_name: measure.split('_').map((w: string) => 
+            w.charAt(0).toUpperCase() + w.slice(1)
+          ).join(' '),
+          description: `${measure} from ${model.name} model`,
+          model_id: model.id,
+          model_name: model.name,
+          measure_column: measure,
+          dimensions: dimensionColumns,
+          aggregation: 'sum', // Default, can be overridden
+          format_type: 'number',
+        });
+      }
+    }
+
+    return NextResponse.json({
+      metrics,
+    });
+  } catch (error) {
+    console.error('List metrics API error:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Internal server error' },
+      { status: 500 }
+    );
+  }
 }

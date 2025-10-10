@@ -226,7 +226,7 @@ export async function evaluateMetricFormula(
         grain: timeContext.grain,
         startDate: timeContext.startDate,
         endDate: timeContext.endDate,
-        filters,
+        dimensions: filters, // API expects 'dimensions' parameter
       }),
     })
 

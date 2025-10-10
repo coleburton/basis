@@ -28,6 +28,7 @@ import {
   Calendar,
 } from "lucide-react"
 import Link from "next/link"
+import { useWorkbook } from "@/lib/workbook/workbook-context"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,6 +37,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Badge } from "@/components/ui/badge"
+import { cn } from "@/lib/utils"
 
 interface CellFormat {
   bold?: boolean
@@ -48,6 +50,10 @@ interface CellFormat {
 type NumberFormatOption = NonNullable<CellFormat['numberFormat']>
 
 interface SpreadsheetToolbarProps {
+  workbookId?: string
+  saving?: boolean
+  hasUnsavedChanges?: boolean
+  onSave?: () => void
   onInsertMetric?: () => void
   onBold?: () => void
   onItalic?: () => void
@@ -58,6 +64,10 @@ interface SpreadsheetToolbarProps {
 }
 
 export function SpreadsheetToolbar({
+  workbookId,
+  saving = false,
+  hasUnsavedChanges = false,
+  onSave,
   onInsertMetric,
   onBold,
   onItalic,
@@ -66,6 +76,7 @@ export function SpreadsheetToolbar({
   onNumberFormat,
   currentFormat
 }: SpreadsheetToolbarProps) {
+  const { workbookName } = useWorkbook()
   const numberFormat = currentFormat?.numberFormat ?? 'general'
   const numberFormatLabels: Record<NumberFormatOption, string> = {
     general: 'Number',
@@ -96,7 +107,7 @@ export function SpreadsheetToolbar({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="sm" className="gap-2">
-              <span className="font-medium">Q1 2024 Financial Model</span>
+              <span className="font-medium">{workbookName}</span>
               <ChevronDown className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
@@ -136,10 +147,6 @@ export function SpreadsheetToolbar({
 
       {/* Right Section - Status & Actions */}
       <div className="flex items-center gap-3">
-        <Badge variant="outline" className="gap-1.5">
-          <div className="h-1.5 w-1.5 rounded-full bg-success" />
-          <span className="text-xs">Synced</span>
-        </Badge>
         <Button variant="ghost" size="icon">
           <RefreshCw className="h-4 w-4" />
         </Button>
@@ -155,7 +162,42 @@ export function SpreadsheetToolbar({
           <Download className="h-4 w-4" />
           Export
         </Button>
-        <Button size="sm" className="gap-2">
+        
+        {/* Status badge with color between Export and Save */}
+        {workbookId && (
+          <div className={cn(
+            "text-xs px-2 py-1 rounded-md flex items-center gap-1.5",
+            saving 
+              ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200" 
+              : hasUnsavedChanges
+              ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+              : "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+          )}>
+            {saving ? (
+              <>
+                <div className="w-2 h-2 rounded-full bg-yellow-600 animate-pulse" />
+                Saving...
+              </>
+            ) : hasUnsavedChanges ? (
+              <>
+                <div className="w-2 h-2 rounded-full bg-yellow-600" />
+                Unsaved
+              </>
+            ) : (
+              <>
+                <div className="w-2 h-2 rounded-full bg-green-600" />
+                Saved
+              </>
+            )}
+          </div>
+        )}
+        
+        <Button 
+          size="sm" 
+          className="gap-2"
+          onClick={onSave}
+          disabled={saving || !hasUnsavedChanges}
+        >
           <Save className="h-4 w-4" />
           Save
         </Button>

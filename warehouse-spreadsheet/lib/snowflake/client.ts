@@ -88,12 +88,20 @@ export class SnowflakeClient {
       };
     }
 
-    // Check for denied patterns
-    for (const pattern of DENIED_PATTERNS) {
+    // Check for denied patterns - but only as full SQL keywords (word boundaries)
+    // This prevents false positives from column names like ROLE_CREATED_ET
+    const dangerousKeywords = [
+      'CREATE\\s+', 'DROP\\s+', 'ALTER\\s+', 'GRANT\\s+', 'REVOKE\\s+',
+      'MERGE\\s+', 'DELETE\\s+FROM', 'UPDATE\\s+', 'INSERT\\s+INTO',
+      'TRUNCATE\\s+', 'CALL\\s+', 'EXECUTE\\s+IMMEDIATE'
+    ];
+
+    for (const keyword of dangerousKeywords) {
+      const pattern = new RegExp(`\\b${keyword}`, 'i');
       if (pattern.test(sql)) {
         return {
           valid: false,
-          error: `SQL contains forbidden pattern: ${pattern.source}`,
+          error: `SQL contains forbidden statement: ${keyword.replace('\\\\s\\+', '')}. Only read-only queries are allowed.`,
         };
       }
     }

@@ -200,3 +200,104 @@ export function listMetricsForModel(modelName: string, orgId: string = 'default'
     (m) => m.model_id === model.id && m.org_id === orgId
   );
 }
+
+// =============================================================================
+// DATABASE SYNC FUNCTIONS
+// =============================================================================
+
+/**
+ * Sync code-defined models to Supabase database
+ * This allows models defined in code to be stored in the database
+ * for materialization and querying
+ */
+export async function syncModelsToDatabase(supabase: any, orgId: string = 'default'): Promise<void> {
+  const models = listModels(orgId);
+
+  for (const model of models) {
+    // Check if model already exists
+    const { data: existing } = await supabase
+      .from('models_catalog')
+      .select('id')
+      .eq('org_id', model.org_id)
+      .eq('name', model.name)
+      .single();
+
+    if (existing) {
+      // Update existing model
+      await supabase
+        .from('models_catalog')
+        .update({
+          database: model.database,
+          schema: model.schema,
+          model_type: model.model_type,
+          primary_date_column: model.primary_date_column,
+        })
+        .eq('id', existing.id);
+    } else {
+      // Insert new model
+      await supabase
+        .from('models_catalog')
+        .insert({
+          id: model.id,
+          org_id: model.org_id,
+          name: model.name,
+          database: model.database,
+          schema: model.schema,
+          model_type: model.model_type,
+          primary_date_column: model.primary_date_column,
+        });
+    }
+  }
+}
+
+/**
+ * Sync code-defined metrics to Supabase database
+ */
+export async function syncMetricsToDatabase(supabase: any, orgId: string = 'default'): Promise<void> {
+  const metrics = listMetrics(orgId);
+
+  for (const metric of metrics) {
+    // Check if metric already exists
+    const { data: existing } = await supabase
+      .from('metrics')
+      .select('id')
+      .eq('org_id', metric.org_id)
+      .eq('name', metric.name)
+      .single();
+
+    if (existing) {
+      // Update existing metric
+      await supabase
+        .from('metrics')
+        .update({
+          model_id: metric.model_id,
+          display_name: metric.display_name,
+          description: metric.description,
+          measure_column: metric.measure_column,
+          aggregation: metric.aggregation,
+          filters: metric.filters,
+          format_type: metric.format_type,
+          currency_code: metric.currency_code,
+        })
+        .eq('id', existing.id);
+    } else {
+      // Insert new metric
+      await supabase
+        .from('metrics')
+        .insert({
+          id: metric.id,
+          org_id: metric.org_id,
+          model_id: metric.model_id,
+          name: metric.name,
+          display_name: metric.display_name,
+          description: metric.description,
+          measure_column: metric.measure_column,
+          aggregation: metric.aggregation,
+          filters: metric.filters,
+          format_type: metric.format_type,
+          currency_code: metric.currency_code,
+          created_by: null,
+        });
+    }
+  }
+}
