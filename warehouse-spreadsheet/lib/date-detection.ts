@@ -389,7 +389,7 @@ export function getTimeContextCount(context: DetectedTimeContext): string {
  * @returns Array of detected date ranges with their row positions
  */
 export function detectAllDateRanges(
-  gridData: Array<Array<{ raw: string }>>,
+  gridData: Array<Array<{ raw: string; display?: string }>>,
   previousRanges: DetectedDateRange[] = []
 ): DetectedDateRange[] {
   const ranges: DetectedDateRange[] = []
@@ -399,7 +399,8 @@ export function detectAllDateRanges(
   const previousByRow = new Map(previousRanges.map(r => [r.rowIndex, r]))
 
   gridData.forEach((row, rowIndex) => {
-    const headers = row.map(cell => cell.raw || "")
+    // Use display value if available (for formula-computed values), otherwise use raw
+    const headers = row.map(cell => cell.display ?? cell.raw || "")
 
     // Manually detect to track column positions
     const startCol = 1

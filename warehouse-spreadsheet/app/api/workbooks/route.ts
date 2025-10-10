@@ -1,102 +1,107 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getServerSupabaseClient } from '@/lib/supabase/client';
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerSupabaseClient } from '@/lib/supabase/client'
+import { nanoid } from 'nanoid'
 
 /**
  * GET /api/workbooks
- * 
- * List all workbooks for an organization
+ * List all workbooks for the current org
  */
 export async function GET(request: NextRequest) {
   try {
-    const orgId = process.env.NEXT_PUBLIC_ORG_ID || 'default_org';
-    const supabase = getServerSupabaseClient();
+    const orgId = process.env.NEXT_PUBLIC_ORG_ID || 'default'
+    const supabase = getServerSupabaseClient()
 
     const { data: workbooks, error } = await supabase
       .from('workbooks')
-      .select('*')
+      .select('id, name, description, created_at, updated_at, last_opened_at')
       .eq('org_id', orgId)
-      .order('updated_at', { ascending: false });
+      .order('updated_at', { ascending: false })
 
     if (error) {
-      throw error;
+      console.error('Error fetching workbooks:', error)
+      throw error
     }
 
-    return NextResponse.json({
-      workbooks: workbooks || [],
-    });
+    return NextResponse.json({ workbooks })
   } catch (error) {
-    console.error('List workbooks error:', error);
+    console.error('Workbooks list API error:', error)
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
-    );
+    )
   }
 }
 
 /**
  * POST /api/workbooks
- * 
- * Create a new workbook
+ * Create a new workbook with default sheets
  */
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { name, org_id } = body;
+    const orgId = process.env.NEXT_PUBLIC_ORG_ID || 'default'
+    const supabase = getServerSupabaseClient()
+    const body = await request.json()
 
-    if (!name || !org_id) {
+    const { name, description } = body
+
+    if (!name) {
       return NextResponse.json(
-        { error: 'name and org_id are required' },
+        { error: 'Workbook name is required' },
         { status: 400 }
-      );
+      )
     }
 
-    const supabase = getServerSupabaseClient();
-
-    const { data, error } = await supabase
+    // Create workbook
+    const { data: workbook, error: workbookError } = await supabase
       .from('workbooks')
       .insert({
         name,
-        org_id,
-        created_by: 'user', // Will be actual user ID when auth is implemented
+        description: description || '',
+        org_id: orgId
       })
       .select()
-      .single();
+      .single()
 
-    if (error) {
-      console.error('Failed to create workbook:', error);
-      return NextResponse.json(
-        { error: error.message },
-        { status: 500 }
-      );
+    if (workbookError) {
+      console.error('Error creating workbook:', workbookError)
+      throw workbookError
     }
 
-    // Create a default blank sheet for the new workbook
-    const { error: sheetError } = await supabase
+    // Create initial sheet
+    const { data: sheet, error: sheetError } = await supabase
       .from('sheets')
       .insert({
-        workbook_id: data.id,
+        workbook_id: workbook.id,
         name: 'Sheet 1',
         position: 0,
-        cell_data: { gridData: [], metricRanges: {}, metricCells: {} },
-        num_rows: 50,
-        num_cols: 10,
-      });
+        cell_data: {}
+      })
+      .select()
+      .single()
 
     if (sheetError) {
-      console.error('Failed to create default sheet:', sheetError);
-      // Don't fail the whole request, just log the error
+      console.error('Error creating initial sheet:', sheetError)
+      throw sheetError
     }
 
     return NextResponse.json({
-      success: true,
-      workbook: data,
-    });
+      workbook: {
+        ...workbook,
+        sheets: [
+          {
+            id: sheet.id,
+            name: sheet.name,
+            position: sheet.position,
+            metricRanges: {}
+          }
+        ]
+      }
+    })
   } catch (error) {
-    console.error('Create workbook error:', error);
+    console.error('Workbook creation API error:', error)
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
-    );
+    )
   }
 }
-

@@ -49,10 +49,11 @@ interface CellFormat {
 
 type NumberFormatOption = NonNullable<CellFormat['numberFormat']>
 
+export type SaveStatus = 'saved' | 'saving' | 'unsaved' | 'error'
+
 interface SpreadsheetToolbarProps {
-  workbookId?: string
-  saving?: boolean
-  hasUnsavedChanges?: boolean
+  workbookName?: string
+  saveStatus?: SaveStatus
   onSave?: () => void
   onInsertMetric?: () => void
   onBold?: () => void
@@ -64,9 +65,8 @@ interface SpreadsheetToolbarProps {
 }
 
 export function SpreadsheetToolbar({
-  workbookId,
-  saving = false,
-  hasUnsavedChanges = false,
+  workbookName = "Untitled Workbook",
+  saveStatus = 'saved',
   onSave,
   onInsertMetric,
   onBold,
@@ -85,6 +85,32 @@ export function SpreadsheetToolbar({
     text: 'Plain Text',
     date: 'Date',
   }
+
+  // Save status badge configuration
+  const saveStatusConfig = {
+    saved: {
+      text: 'Saved',
+      color: 'bg-success',
+      variant: 'outline' as const
+    },
+    saving: {
+      text: 'Saving...',
+      color: 'bg-warning animate-pulse',
+      variant: 'outline' as const
+    },
+    unsaved: {
+      text: 'Unsaved',
+      color: 'bg-muted',
+      variant: 'outline' as const
+    },
+    error: {
+      text: 'Error',
+      color: 'bg-destructive',
+      variant: 'destructive' as const
+    }
+  }
+
+  const statusConfig = saveStatusConfig[saveStatus]
 
   return (
     <div className="border-b border-border bg-card">
@@ -147,6 +173,10 @@ export function SpreadsheetToolbar({
 
       {/* Right Section - Status & Actions */}
       <div className="flex items-center gap-3">
+        <Badge variant={statusConfig.variant} className="gap-1.5">
+          <div className={`h-1.5 w-1.5 rounded-full ${statusConfig.color}`} />
+          <span className="inline-block w-14 text-center text-xs">{statusConfig.text}</span>
+        </Badge>
         <Button variant="ghost" size="icon">
           <RefreshCw className="h-4 w-4" />
         </Button>
@@ -162,41 +192,11 @@ export function SpreadsheetToolbar({
           <Download className="h-4 w-4" />
           Export
         </Button>
-        
-        {/* Status badge with color between Export and Save */}
-        {workbookId && (
-          <div className={cn(
-            "text-xs px-2 py-1 rounded-md flex items-center gap-1.5",
-            saving 
-              ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200" 
-              : hasUnsavedChanges
-              ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
-              : "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-          )}>
-            {saving ? (
-              <>
-                <div className="w-2 h-2 rounded-full bg-yellow-600 animate-pulse" />
-                Saving...
-              </>
-            ) : hasUnsavedChanges ? (
-              <>
-                <div className="w-2 h-2 rounded-full bg-yellow-600" />
-                Unsaved
-              </>
-            ) : (
-              <>
-                <div className="w-2 h-2 rounded-full bg-green-600" />
-                Saved
-              </>
-            )}
-          </div>
-        )}
-        
-        <Button 
-          size="sm" 
+        <Button
+          size="sm"
           className="gap-2"
           onClick={onSave}
-          disabled={saving || !hasUnsavedChanges}
+          disabled={saveStatus === 'saving' || saveStatus === 'saved'}
         >
           <Save className="h-4 w-4" />
           Save

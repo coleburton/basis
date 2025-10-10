@@ -47,13 +47,20 @@ export interface Sheet {
   hyperformulaSheetId?: number
 }
 
+export type SaveStatus = 'saved' | 'saving' | 'unsaved' | 'error'
+
 export interface WorkbookContextValue {
+  // Workbook metadata
+  workbookId: string | null
   workbookName: string
+  saveStatus: SaveStatus
+
+  // Sheets
   sheets: Sheet[]
   activeSheetId: string
   activeSheet: Sheet | null
-  hasUnsavedChanges: boolean
-  lastSavedAt: Date | null
+
+  // Sheet operations
   addSheet: (name?: string) => string
   deleteSheet: (sheetId: string) => void
   renameSheet: (sheetId: string, newName: string) => void
@@ -63,10 +70,12 @@ export interface WorkbookContextValue {
   updateSheetMetricCells: (sheetId: string, metricCells: Record<string, MetricCellResult>) => void
   getSheet: (sheetId: string) => Sheet | null
   getSheetByName: (name: string) => Sheet | null
-  loadWorkbookData?: (workbook: any) => void
-  saveWorkbookData?: (workbookId: string) => Promise<boolean>
-  markDirty: () => void
-  markClean: () => void
+
+  // Persistence operations
+  loadWorkbook: (id: string) => Promise<void>
+  saveWorkbook: () => Promise<void>
+  createWorkbook: (name: string, description?: string) => Promise<string>
+  renameWorkbook: (newName: string) => void
 }
 
 const WorkbookContext = createContext<WorkbookContextValue | null>(null)
@@ -115,8 +124,21 @@ const createEmptyGridData = (): CellContent[][] => {
   return grid
 }
 
-export function WorkbookProvider({ children }: { children: ReactNode }) {
+export function WorkbookProvider({ 
+  children,
+  initialWorkbookId
+}: { 
+  children: ReactNode
+  initialWorkbookId?: string | null
+}) {
   const sheetCounter = useRef(1)
+  const saveTimeoutRef = useRef<NodeJS.Timeout>()
+  const hasLoadedInitialWorkbook = useRef(false)
+
+  // Workbook state
+  const [workbookId, setWorkbookId] = useState<string | null>(null)
+  const [workbookName, setWorkbookName] = useState<string>("Untitled Workbook")
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
 
   const [workbookName, setWorkbookName] = useState<string>("Untitled Workbook")
   const [sheets, setSheets] = useState<Sheet[]>(() => [
@@ -220,123 +242,161 @@ export function WorkbookProvider({ children }: { children: ReactNode }) {
     return sheets.find(s => s.name === name) || null
   }, [sheets])
 
-  // Helper function to convert old flat coordinate format to gridData array format
-  const convertCellDataFormat = useCallback((cell_data: any): { gridData: CellContent[][], metricRanges: Record<string, MetricRangeConfig>, metricCells: Record<string, MetricCellResult> } => {
-    // If no data, return empty
-    if (!cell_data || Object.keys(cell_data).length === 0) {
-      return {
-        gridData: createEmptyGridData(),
-        metricRanges: {},
-        metricCells: {},
+  // Persistence functions
+  const loadWorkbook = useCallback(async (id: string) => {
+    try {
+      setSaveStatus('saving')
+      const response = await fetch(`/api/workbooks/${id}`)
+
+      if (!response.ok) {
+        throw new Error('Failed to load workbook')
       }
-    }
-    
-    // If already in new format with gridData array
-    if (cell_data.gridData && Array.isArray(cell_data.gridData)) {
-      return {
-        gridData: cell_data.gridData.length > 0 ? cell_data.gridData : createEmptyGridData(),
-        metricRanges: cell_data.metricRanges || {},
-        metricCells: cell_data.metricCells || {},
-      }
-    }
-    
-    // Convert old flat coordinate format like {"0,1": {raw: "Q1 2024"}}
-    const gridData = createEmptyGridData()
-    for (const [key, value] of Object.entries(cell_data)) {
-      if (key.includes(',')) {
-        const [row, col] = key.split(',').map(Number)
-        if (gridData[row] && gridData[row][col]) {
-          gridData[row][col] = value as CellContent
-        }
-      }
-    }
-    
-    return {
-      gridData,
-      metricRanges: {},
-      metricCells: {},
+
+      const data = await response.json()
+
+      setWorkbookId(data.id)
+      setWorkbookName(data.name)
+      setSheets(data.sheets)
+      setActiveSheetId(data.sheets[0]?.id || '')
+      setSaveStatus('saved')
+    } catch (error) {
+      console.error('Error loading workbook:', error)
+      setSaveStatus('error')
+      throw error
     }
   }, [])
 
-  const loadWorkbookData = useCallback((workbook: any) => {
-    console.log('[WorkbookContext] Loading workbook data:', workbook)
-    
-    // Set workbook name
-    if (workbook.name) {
-      setWorkbookName(workbook.name)
+  const saveWorkbook = useCallback(async () => {
+    if (!workbookId) {
+      console.warn('Cannot save: no workbook ID')
+      return
     }
-    
-    if (workbook.sheets && workbook.sheets.length > 0) {
-      const loadedSheets = workbook.sheets.map((sheet: any) => {
-        // Convert cell_data to the expected format
-        const cellData = convertCellDataFormat(sheet.cell_data)
-        
-        return {
-          id: sheet.id,
-          name: sheet.name || 'Untitled',
-          gridData: cellData.gridData,
-          metricRanges: cellData.metricRanges,
-          metricCells: cellData.metricCells,
-        }
-      })
-      
-      console.log('[WorkbookContext] Loaded sheets:', loadedSheets.map((s: Sheet) => ({ id: s.id, name: s.name })))
-      setSheets(loadedSheets)
-      setActiveSheetId(loadedSheets[0].id)
-      // Mark as clean since we just loaded from DB
-      setHasUnsavedChanges(false)
-      setLastSavedAt(new Date())
-    }
-  }, [convertCellDataFormat])
 
-  const saveWorkbookData = useCallback(async (workbookId: string) => {
-    console.log('[WorkbookContext] Saving workbook:', workbookId)
-    
     try {
-      const sheetsToSave = sheets.map((sheet, index) => ({
-        id: sheet.id,
-        name: sheet.name,
-        position: index,
-        cell_data: {
-          gridData: sheet.gridData,
-          metricRanges: sheet.metricRanges,
-          metricCells: sheet.metricCells,
-        },
-      }))
-
-      console.log('[WorkbookContext] Saving cell_data structure:', {
-        sheetCount: sheetsToSave.length,
-        hasGridData: !!sheetsToSave[0]?.cell_data?.gridData,
-        gridDataLength: sheetsToSave[0]?.cell_data?.gridData?.length,
-        isArray: Array.isArray(sheetsToSave[0]?.cell_data?.gridData)
-      })
+      setSaveStatus('saving')
 
       const response = await fetch(`/api/workbooks/${workbookId}`, {
-        method: 'PATCH',
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheets: sheetsToSave }),
+        body: JSON.stringify({
+          name: workbookName,
+          sheets: sheets.map(sheet => ({
+            id: sheet.id,
+            name: sheet.name,
+            gridData: sheet.gridData,
+            metricRanges: sheet.metricRanges,
+            hyperformulaSheetId: sheet.hyperformulaSheetId
+          }))
+        })
       })
 
       if (!response.ok) {
         throw new Error('Failed to save workbook')
       }
 
-      console.log('[WorkbookContext] ✅ Workbook saved successfully')
-      markClean()
-      return true
+      setSaveStatus('saved')
     } catch (error) {
-      console.error('[WorkbookContext] Save error:', error)
-      return false
+      console.error('Error saving workbook:', error)
+      setSaveStatus('error')
+      throw error
     }
-  }, [sheets, markClean])
+  }, [workbookId, workbookName, sheets])
+
+  const createWorkbook = useCallback(async (name: string, description?: string): Promise<string> => {
+    try {
+      setSaveStatus('saving')
+
+      const response = await fetch('/api/workbooks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description })
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to create workbook')
+      }
+
+      const data = await response.json()
+      const newWorkbookId = data.workbook.id
+
+      setWorkbookId(newWorkbookId)
+      setWorkbookName(name)
+      setSheets(data.workbook.sheets.map((s: any) => ({
+        ...s,
+        gridData: createEmptyGridData(),
+        metricCells: {}
+      })))
+      setActiveSheetId(data.workbook.sheets[0]?.id || '')
+      setSaveStatus('saved')
+
+      return newWorkbookId
+    } catch (error) {
+      console.error('Error creating workbook:', error)
+      setSaveStatus('error')
+      throw error
+    }
+  }, [])
+
+  const renameWorkbook = useCallback((newName: string) => {
+    setWorkbookName(newName)
+    setSaveStatus('unsaved')
+  }, [])
+
+  // Load initial workbook on mount if provided
+  useEffect(() => {
+    if (initialWorkbookId && !hasLoadedInitialWorkbook.current && !workbookId) {
+      hasLoadedInitialWorkbook.current = true
+      loadWorkbook(initialWorkbookId).catch((error) => {
+        console.error('Failed to load initial workbook:', error)
+      })
+    }
+  }, [initialWorkbookId, workbookId, loadWorkbook])
+
+  // Debounced auto-save
+  const debouncedSave = useCallback(() => {
+    if (!workbookId) return // Don't save if workbook hasn't been created yet
+
+    setSaveStatus('unsaved')
+
+    // Clear existing timeout
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current)
+    }
+
+    // Save after 3 seconds of inactivity
+    saveTimeoutRef.current = setTimeout(() => {
+      saveWorkbook()
+    }, 3000)
+  }, [workbookId, saveWorkbook])
+
+  // Auto-save when sheets change
+  useEffect(() => {
+    if (workbookId) {
+      debouncedSave()
+    }
+  }, [sheets, workbookName, debouncedSave, workbookId])
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const value: WorkbookContextValue = {
+    // Workbook metadata
+    workbookId,
     workbookName,
+    saveStatus,
+
+    // Sheets
     sheets,
     activeSheetId,
     activeSheet,
-    hasUnsavedChanges,
-    lastSavedAt,
+
+    // Sheet operations
     addSheet,
     deleteSheet,
     renameSheet,
@@ -346,10 +406,12 @@ export function WorkbookProvider({ children }: { children: ReactNode }) {
     updateSheetMetricCells,
     getSheet,
     getSheetByName,
-    loadWorkbookData,
-    saveWorkbookData,
-    markDirty,
-    markClean,
+
+    // Persistence operations
+    loadWorkbook,
+    saveWorkbook,
+    createWorkbook,
+    renameWorkbook,
   }
 
   return (

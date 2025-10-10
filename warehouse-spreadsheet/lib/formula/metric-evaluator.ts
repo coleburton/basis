@@ -182,9 +182,12 @@ export async function evaluateMetricFormula(
   col: number,
   detectedRanges: DetectedDateRange[]
 ): Promise<MetricEvaluationResult> {
+  console.log(`[MetricEvaluator] Evaluating formula at [${row},${col}]:`, formula)
+
   // Parse the formula
   const parsed = parseMetricFormula(formula)
   if (!parsed) {
+    console.error(`[MetricEvaluator] Failed to parse formula:`, formula)
     return {
       value: null,
       loading: false,
@@ -193,16 +196,30 @@ export async function evaluateMetricFormula(
   }
 
   const { metricName, filters = {} } = parsed
+  console.log(`[MetricEvaluator] Parsed metric:`, { metricName, filters })
 
   // Find time context for this column
+  console.log(`[MetricEvaluator] Looking for time context at col=${col}, row=${row}`)
+  console.log(`[MetricEvaluator] Detected ranges:`, detectedRanges.map(r => ({
+    rowIndex: r.rowIndex,
+    startCol: r.startCol,
+    endCol: r.endCol,
+    grain: r.context.grain,
+    startPeriod: r.context.startPeriod,
+    endPeriod: r.context.endPeriod,
+  })))
+
   const timeContext = findTimeContextForColumn(col, row, detectedRanges)
   if (!timeContext) {
+    console.error(`[MetricEvaluator] No time context found for column ${col}, row ${row}`)
     return {
       value: null,
       loading: false,
-      error: 'No time context found for this column',
+      error: `No time context found (col=${col}, row=${row})`,
     }
   }
+
+  console.log(`[MetricEvaluator] Found time context:`, timeContext)
 
   // Check cache
   const cacheKey = getCacheKey(metricName, timeContext.startDate, timeContext.endDate, filters)
@@ -216,29 +233,37 @@ export async function evaluateMetricFormula(
 
   // Make API call
   try {
+    const requestBody = {
+      metricName,
+      grain: timeContext.grain,
+      startDate: timeContext.startDate,
+      endDate: timeContext.endDate,
+      filters,
+    }
+    console.log(`[MetricEvaluator] Making API request to /api/metrics:`, requestBody)
+
     const response = await fetch('/api/metrics', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        metricName,
-        grain: timeContext.grain,
-        startDate: timeContext.startDate,
-        endDate: timeContext.endDate,
-        dimensions: filters, // API expects 'dimensions' parameter
-      }),
+      body: JSON.stringify(requestBody),
     })
+
+    console.log(`[MetricEvaluator] API response status:`, response.status, response.statusText)
 
     if (!response.ok) {
       let errorMessage = 'Failed to fetch metric'
       try {
         const error = await response.json()
-        errorMessage = error.error || errorMessage
+        console.error(`[MetricEvaluator] API error response:`, error)
+        // Use the details field if available for more specific error info
+        errorMessage = error.details || error.error || errorMessage
       } catch {
         // Response wasn't JSON, use the status text
         errorMessage = `${response.status}: ${response.statusText}`
       }
+      console.error(`[MetricEvaluator] Returning error:`, errorMessage)
       return {
         value: null,
         loading: false,
@@ -247,6 +272,8 @@ export async function evaluateMetricFormula(
     }
 
     const data = await response.json()
+    console.log(`[MetricEvaluator] API success response:`, data)
+
     const result: MetricEvaluationResult = {
       value: data.value,
       loading: false,
@@ -259,13 +286,15 @@ export async function evaluateMetricFormula(
       timestamp: Date.now(),
     }
 
+    console.log(`[MetricEvaluator] Returning result:`, result)
     return result
   } catch (error) {
-    console.error('Metric evaluation error:', error)
+    console.error('[MetricEvaluator] Caught exception during evaluation:', error)
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return {
       value: null,
       loading: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: errorMessage,
     }
   }
 }

@@ -1,196 +1,225 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getServerSupabaseClient } from '@/lib/supabase/client';
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerSupabaseClient } from '@/lib/supabase/client'
+import { gridDataToSparse, sparseToGridData, type SparseCellData } from '@/lib/workbook/sparse-storage'
+import type { CellContent, MetricRangeConfig } from '@/lib/workbook/workbook-context'
 
 /**
  * GET /api/workbooks/[id]
- * 
- * Load a specific workbook with all its sheets and data
+ * Load a workbook with all its sheets and data
  */
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const workbookId = params.id;
-    console.log(`[Workbooks API] Loading workbook: ${workbookId}`);
-    
-    const supabase = getServerSupabaseClient();
+    const { id } = params
+    const supabase = getServerSupabaseClient()
 
-    // Load workbook metadata
+    // Fetch workbook metadata
     const { data: workbook, error: workbookError } = await supabase
       .from('workbooks')
       .select('*')
-      .eq('id', workbookId)
-      .single();
+      .eq('id', id)
+      .single()
 
-    if (workbookError || !workbook) {
-      console.error(`[Workbooks API] Workbook not found:`, workbookError);
-      return NextResponse.json(
-        { error: 'Workbook not found' },
-        { status: 404 }
-      );
+    if (workbookError) {
+      if (workbookError.code === 'PGRST116') {
+        return NextResponse.json(
+          { error: 'Workbook not found' },
+          { status: 404 }
+        )
+      }
+      throw workbookError
     }
 
-    // Load sheets for this workbook
+    // Update last_opened_at timestamp
+    await supabase.rpc('update_workbook_last_opened', { workbook_uuid: id })
+
+    // Fetch all sheets for this workbook
     const { data: sheets, error: sheetsError } = await supabase
       .from('sheets')
       .select('*')
-      .eq('workbook_id', workbookId)
-      .order('position', { ascending: true });
+      .eq('workbook_id', id)
+      .order('position')
 
     if (sheetsError) {
-      console.error(`[Workbooks API] Failed to load sheets:`, sheetsError);
-      throw sheetsError;
+      throw sheetsError
     }
 
-    console.log(`[Workbooks API] ✅ Loaded workbook with ${sheets?.length || 0} sheets`);
+    // Fetch metric ranges for all sheets
+    const sheetIds = sheets.map(s => s.id)
+    const { data: metricRanges, error: metricRangesError } = await supabase
+      .from('metric_ranges')
+      .select('*')
+      .in('sheet_id', sheetIds)
+
+    if (metricRangesError) {
+      throw metricRangesError
+    }
+
+    // Convert sparse cell data to dense grid format
+    const sheetsWithGridData = sheets.map(sheet => {
+      const cellData = sheet.cell_data as SparseCellData
+      const gridData = sparseToGridData(
+        cellData,
+        sheet.num_rows || 50,
+        sheet.num_cols || 10
+      )
+
+      // Build metric ranges map for this sheet
+      const sheetMetricRanges = metricRanges
+        .filter(mr => mr.sheet_id === sheet.id)
+        .reduce((acc, mr) => {
+          acc[mr.range_id] = mr.config as MetricRangeConfig
+          return acc
+        }, {} as Record<string, MetricRangeConfig>)
+
+      return {
+        id: sheet.id,
+        name: sheet.name,
+        gridData,
+        metricRanges: sheetMetricRanges,
+        metricCells: {}, // Metric cells will be evaluated on the client
+        hyperformulaSheetId: sheet.hyperformula_sheet_id
+      }
+    })
 
     return NextResponse.json({
-      workbook: {
-        ...workbook,
-        sheets: sheets || [],
-      },
-    });
+      id: workbook.id,
+      name: workbook.name,
+      description: workbook.description,
+      createdAt: workbook.created_at,
+      updatedAt: workbook.updated_at,
+      sheets: sheetsWithGridData
+    })
   } catch (error) {
-    console.error('[Workbooks API] Error:', error);
+    console.error('Workbook fetch API error:', error)
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
-    );
+    )
   }
 }
 
 /**
- * PATCH /api/workbooks/[id]
- * 
- * Update workbook metadata and save sheet data
+ * PUT /api/workbooks/[id]
+ * Save/update a workbook and all its sheets
  */
-export async function PATCH(
+export async function PUT(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const workbookId = params.id;
-    const body = await request.json();
-    
-    console.log(`[Workbooks API] Saving workbook: ${workbookId}`);
-    
-    const supabase = getServerSupabaseClient();
+    const { id } = params
+    const supabase = getServerSupabaseClient()
+    const body = await request.json()
 
-    // Update workbook metadata if provided
-    if (body.name) {
-      const { error: updateError } = await supabase
+    const { name, description, sheets } = body
+
+    // Update workbook metadata
+    if (name || description !== undefined) {
+      const { error: workbookError } = await supabase
         .from('workbooks')
-        .update({ name: body.name })
-        .eq('id', workbookId);
+        .update({
+          ...(name && { name }),
+          ...(description !== undefined && { description })
+        })
+        .eq('id', id)
 
-      if (updateError) {
-        throw updateError;
+      if (workbookError) {
+        throw workbookError
       }
     }
 
-    // Save sheets data if provided
-    if (body.sheets && Array.isArray(body.sheets)) {
-      console.log(`[Workbooks API] Saving ${body.sheets.length} sheets`);
-      
-      for (const sheet of body.sheets) {
-        const { id, name, position, cell_data } = sheet;
-        
-        // Log cell_data structure
-        console.log(`[Workbooks API] Sheet "${name}" cell_data structure:`, {
-          hasGridData: !!cell_data?.gridData,
-          gridDataIsArray: Array.isArray(cell_data?.gridData),
-          gridDataLength: cell_data?.gridData?.length,
-          hasMetricRanges: !!cell_data?.metricRanges,
-          hasMetricCells: !!cell_data?.metricCells,
-        });
-        
-        if (!id) {
-          // Create new sheet
-          const { error: insertError } = await supabase
-            .from('sheets')
-            .insert({
-              workbook_id: workbookId,
-              name: name || 'Untitled Sheet',
-              position: position || 0,
-              cell_data: cell_data || {},
-              num_rows: 50,
-              num_cols: 10,
-            });
+    // Update each sheet if provided
+    if (sheets && Array.isArray(sheets)) {
+      for (const sheet of sheets) {
+        // Convert dense grid data to sparse format
+        const sparse = gridDataToSparse(sheet.gridData as CellContent[][])
 
-          if (insertError) {
-            console.error(`[Workbooks API] Failed to insert sheet:`, insertError);
-            throw insertError;
-          }
-        } else {
-          // Update existing sheet
-          const { error: updateError } = await supabase
-            .from('sheets')
-            .update({
-              name,
-              position,
-              cell_data,
+        // Update sheet
+        const { error: sheetError } = await supabase
+          .from('sheets')
+          .update({
+            name: sheet.name,
+            cell_data: sparse,
+            ...(sheet.hyperformulaSheetId !== undefined && {
+              hyperformula_sheet_id: sheet.hyperformulaSheetId
             })
-            .eq('id', id);
+          })
+          .eq('id', sheet.id)
 
-          if (updateError) {
-            console.error(`[Workbooks API] Failed to update sheet:`, updateError);
-            throw updateError;
+        if (sheetError) {
+          throw sheetError
+        }
+
+        // Update metric ranges
+        // First, delete all existing metric ranges for this sheet
+        await supabase
+          .from('metric_ranges')
+          .delete()
+          .eq('sheet_id', sheet.id)
+
+        // Then insert new ones
+        const metricRangeRows = Object.entries(sheet.metricRanges || {}).map(
+          ([rangeId, config]) => ({
+            sheet_id: sheet.id,
+            range_id: rangeId,
+            metric_id: (config as MetricRangeConfig).metricId,
+            config: config
+          })
+        )
+
+        if (metricRangeRows.length > 0) {
+          const { error: metricRangesError } = await supabase
+            .from('metric_ranges')
+            .insert(metricRangeRows)
+
+          if (metricRangesError) {
+            throw metricRangesError
           }
-          
-          console.log(`[Workbooks API] ✅ Updated sheet "${name}" successfully`);
         }
       }
     }
 
-    console.log(`[Workbooks API] ✅ Workbook saved successfully`);
-
-    return NextResponse.json({
-      success: true,
-      message: 'Workbook saved',
-    });
+    return NextResponse.json({ success: true })
   } catch (error) {
-    console.error('[Workbooks API] Save error:', error);
+    console.error('Workbook save API error:', error)
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
-    );
+    )
   }
 }
 
 /**
  * DELETE /api/workbooks/[id]
- * 
- * Delete a workbook and all its sheets
+ * Delete a workbook and all associated data
  */
 export async function DELETE(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const workbookId = params.id;
-    const supabase = getServerSupabaseClient();
+    const { id } = params
+    const supabase = getServerSupabaseClient()
 
-    // Delete workbook (sheets will be cascade deleted)
-    const { error: deleteError } = await supabase
+    // Delete workbook (cascade will delete sheets and metric_ranges)
+    const { error } = await supabase
       .from('workbooks')
       .delete()
-      .eq('id', workbookId);
+      .eq('id', id)
 
-    if (deleteError) {
-      throw deleteError;
+    if (error) {
+      throw error
     }
 
-    return NextResponse.json({
-      success: true,
-      message: 'Workbook deleted',
-    });
+    return NextResponse.json({ success: true })
   } catch (error) {
-    console.error('[Workbooks API] Delete error:', error);
+    console.error('Workbook delete API error:', error)
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
-    );
+    )
   }
 }
-

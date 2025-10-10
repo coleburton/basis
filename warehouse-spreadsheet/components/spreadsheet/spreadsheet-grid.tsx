@@ -55,6 +55,7 @@ export interface SpreadsheetGridHandle {
   applyFormatting: (format: Partial<CellFormat>) => void
   getSelectionFormat: () => CellFormat | null
   getGridData: () => CellContent[][]
+  getGridDataWithDisplay: () => Array<Array<{ raw: string; display: string }>>
   setCellValue: (row: number, col: number, value: string, options?: { skipUndo?: boolean; metricRangeId?: string | null }) => void
   applyMetricRange: (config: MetricRangeConfig) => void
   getMetricRange: (id: string) => MetricRangeConfig | null
@@ -1057,7 +1058,10 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
   const getCellDisplayValue = useCallback(
     (row: number, col: number): string => {
       const rawValue = gridData[row]?.[col]?.raw ?? ""
-      if (rawValue.startsWith("=")) {
+      const cellFormat = gridData[row]?.[col]?.format
+      const isFormula = rawValue.startsWith("=")
+
+      if (isFormula) {
         // Check if this is a METRIC formula
         if (isMetricFormula(rawValue)) {
           const cellKey = `${row},${col}`
@@ -1083,19 +1087,48 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
         // Regular formula - use HyperFormula
         const engineValue = getEngineValue(row, col)
-        return engineValue === null ? "" : formatComputedValue(row, engineValue)
+        if (engineValue === null) return ""
+
+        // Handle date formatting for formula results
+        if (cellFormat?.numberFormat === 'date' && typeof engineValue === 'number') {
+          const formatted = formatDateValue(engineValue)
+          return formatted ?? rawValue
+        }
+
+        // Auto-detect dates for formula results that look like date serials
+        // Excel date serials are typically between 1 (1/1/1900) and ~100000 (year 2200+)
+        // This matches Excel's behavior of auto-formatting date functions
+        if (typeof engineValue === 'number' && engineValue >= 1 && engineValue <= 100000 && Number.isInteger(engineValue)) {
+          // Try to format as date
+          const formatted = formatDateValue(engineValue)
+          if (formatted) {
+            return formatted
+          }
+        }
+
+        // Handle other number formats
+        if (cellFormat?.numberFormat === 'currency' && typeof engineValue === 'number') {
+          return `$${numberFormatter.format(engineValue)}`
+        }
+        if (cellFormat?.numberFormat === 'percentage' && typeof engineValue === 'number') {
+          return percentFormatter.format(engineValue)
+        }
+
+        return formatComputedValue(row, engineValue)
       }
       return rawValue
     },
-    [formatComputedValue, getEngineValue, gridData, metricCells, numberFormatter]
+    [formatComputedValue, formatDateValue, getEngineValue, gridData, metricCells, numberFormatter, percentFormatter]
   )
 
   // Evaluate metric formulas asynchronously
   const evaluateMetricCell = useCallback(async (row: number, col: number, formula: string) => {
     const cellKey = `${row},${col}`
+    console.log(`[Grid] Starting evaluation for cell [${row},${col}]:`, formula)
 
     // Check if already evaluating
     if (metricEvaluationInProgressRef.current.has(cellKey)) {
+      console.log(`[Grid] Cell [${row},${col}] already being evaluated, skipping`)
       return
     }
 
@@ -1110,7 +1143,9 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
 
     try {
       // Evaluate the metric formula
+      console.log(`[Grid] Calling evaluateMetricFormula for cell [${row},${col}]`)
       const result = await evaluateMetricFormula(formula, row, col, detectedRanges)
+      console.log(`[Grid] Evaluation result for cell [${row},${col}]:`, result)
 
       // Update with result
       setMetricCells(prev => ({
@@ -1119,10 +1154,13 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       }))
       // Only update engine with successful results
       if (!result.error) {
+        console.log(`[Grid] Updating engine with successful result for cell [${row},${col}]`)
         updateEngineMetricValue(row, col, result)
+      } else {
+        console.error(`[Grid] Not updating engine due to error in cell [${row},${col}]:`, result.error)
       }
     } catch (error) {
-      console.error(`Error evaluating metric at [${row}, ${col}]:`, error)
+      console.error(`[Grid] Caught exception evaluating metric at [${row}, ${col}]:`, error)
       setMetricCells(prev => ({
         ...prev,
         [cellKey]: {
@@ -1135,6 +1173,7 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
     } finally {
       // Remove from in-progress set
       metricEvaluationInProgressRef.current.delete(cellKey)
+      console.log(`[Grid] Finished evaluation for cell [${row},${col}]`)
     }
   }, [detectedRanges, updateEngineMetricValue])
 
@@ -2474,6 +2513,14 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
       applyFormatting,
       getSelectionFormat,
       getGridData: () => gridData,
+      getGridDataWithDisplay: () => {
+        return gridData.map((row, rowIndex) =>
+          row.map((cell, colIndex) => ({
+            raw: cell.raw,
+            display: getCellDisplayValue(rowIndex, colIndex)
+          }))
+        )
+      },
       applyMetricRange,
       getMetricRange,
       getMetricRanges: () => metricRanges,
@@ -2701,9 +2748,15 @@ export const SpreadsheetGrid = forwardRef<SpreadsheetGridHandle, SpreadsheetGrid
                 colIdx === rangeConfig.columns[0] &&
                 !isEditing
 
+              // Generate tooltip for errors
+              const cellTitle = isMetric && metricResult?.error
+                ? `Error: ${metricResult.error}`
+                : undefined
+
               return (
                 <div
                   key={colIdx}
+                  title={cellTitle}
                   ref={(el) => {
                     if (!cellRefs.current[rowIdx]) {
                       cellRefs.current[rowIdx] = []
