@@ -140,7 +140,6 @@ export function WorkbookProvider({
   const [workbookName, setWorkbookName] = useState<string>("Untitled Workbook")
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
 
-  const [workbookName, setWorkbookName] = useState<string>("Untitled Workbook")
   const [sheets, setSheets] = useState<Sheet[]>(() => [
     {
       id: nanoid(),

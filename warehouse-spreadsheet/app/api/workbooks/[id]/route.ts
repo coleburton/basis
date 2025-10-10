@@ -9,10 +9,10 @@ import type { CellContent, MetricRangeConfig } from '@/lib/workbook/workbook-con
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params
+    const { id } = await params
     const supabase = getServerSupabaseClient()
 
     // Fetch workbook metadata
@@ -107,10 +107,10 @@ export async function GET(
  */
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params
+    const { id } = await params
     const supabase = getServerSupabaseClient()
     const body = await request.json()
 
@@ -198,10 +198,10 @@ export async function PUT(
  */
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params
+    const { id } = await params
     const supabase = getServerSupabaseClient()
 
     // Delete workbook (cascade will delete sheets and metric_ranges)

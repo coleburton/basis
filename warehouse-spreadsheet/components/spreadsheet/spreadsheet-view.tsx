@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Database, ChevronLeft, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { detectAllDateRanges, type DetectedDateRange } from "@/lib/date-detection"
-import { useWorkbook, type MetricCellResult } from "@/lib/workbook/workbook-context"
+import { useWorkbook, WorkbookProvider, type MetricCellResult } from "@/lib/workbook/workbook-context"
 
 interface CellFormat {
   bold?: boolean
@@ -388,7 +388,6 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
     <div className="flex h-screen flex-col bg-background">
       {/* Top Toolbar */}
       <SpreadsheetToolbar
-        workbookName={workbookName}
         saveStatus={saveStatus}
         onSave={saveWorkbook}
         onInsertMetric={() => {
