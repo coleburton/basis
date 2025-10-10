@@ -14,6 +14,7 @@ import type { SpreadsheetGridHandle, MetricRangeConfig } from "./spreadsheet-gri
 
 interface CellData {
   raw: string
+  display?: string
   format?: {
     bold?: boolean
     italic?: boolean
@@ -168,7 +169,8 @@ export function InsertMetricDialog({
     // Fallback: detect from first row if no detected ranges
     if (!gridData || gridData.length === 0) return null
     const headerRow = gridData[0] || []
-    const headers = headerRow.map(cell => cell.raw || "")
+    // Use display value if available (for formula-computed values), otherwise use raw
+    const headers = headerRow.map(cell => cell.display ?? cell.raw || "")
     return detectTimeContext(headers, 1)
   }, [detectedRanges, detectionRow, gridData])
 

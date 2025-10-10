@@ -47,7 +47,12 @@ interface CellFormat {
 
 type NumberFormatOption = NonNullable<CellFormat['numberFormat']>
 
+export type SaveStatus = 'saved' | 'saving' | 'unsaved' | 'error'
+
 interface SpreadsheetToolbarProps {
+  workbookName?: string
+  saveStatus?: SaveStatus
+  onSave?: () => void
   onInsertMetric?: () => void
   onBold?: () => void
   onItalic?: () => void
@@ -58,6 +63,9 @@ interface SpreadsheetToolbarProps {
 }
 
 export function SpreadsheetToolbar({
+  workbookName = "Untitled Workbook",
+  saveStatus = 'saved',
+  onSave,
   onInsertMetric,
   onBold,
   onItalic,
@@ -74,6 +82,32 @@ export function SpreadsheetToolbar({
     text: 'Plain Text',
     date: 'Date',
   }
+
+  // Save status badge configuration
+  const saveStatusConfig = {
+    saved: {
+      text: 'Saved',
+      color: 'bg-success',
+      variant: 'outline' as const
+    },
+    saving: {
+      text: 'Saving...',
+      color: 'bg-warning animate-pulse',
+      variant: 'outline' as const
+    },
+    unsaved: {
+      text: 'Unsaved',
+      color: 'bg-muted',
+      variant: 'outline' as const
+    },
+    error: {
+      text: 'Error',
+      color: 'bg-destructive',
+      variant: 'destructive' as const
+    }
+  }
+
+  const statusConfig = saveStatusConfig[saveStatus]
 
   return (
     <div className="border-b border-border bg-card">
@@ -96,7 +130,7 @@ export function SpreadsheetToolbar({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="sm" className="gap-2">
-              <span className="font-medium">Q1 2024 Financial Model</span>
+              <span className="font-medium">{workbookName}</span>
               <ChevronDown className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
@@ -136,9 +170,9 @@ export function SpreadsheetToolbar({
 
       {/* Right Section - Status & Actions */}
       <div className="flex items-center gap-3">
-        <Badge variant="outline" className="gap-1.5">
-          <div className="h-1.5 w-1.5 rounded-full bg-success" />
-          <span className="text-xs">Synced</span>
+        <Badge variant={statusConfig.variant} className="gap-1.5">
+          <div className={`h-1.5 w-1.5 rounded-full ${statusConfig.color}`} />
+          <span className="inline-block w-14 text-center text-xs">{statusConfig.text}</span>
         </Badge>
         <Button variant="ghost" size="icon">
           <RefreshCw className="h-4 w-4" />
@@ -155,7 +189,12 @@ export function SpreadsheetToolbar({
           <Download className="h-4 w-4" />
           Export
         </Button>
-        <Button size="sm" className="gap-2">
+        <Button
+          size="sm"
+          className="gap-2"
+          onClick={onSave}
+          disabled={saveStatus === 'saving' || saveStatus === 'saved'}
+        >
           <Save className="h-4 w-4" />
           Save
         </Button>
