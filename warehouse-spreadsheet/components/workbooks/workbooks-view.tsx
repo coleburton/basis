@@ -46,45 +46,6 @@ export function WorkbooksView() {
   const [isCreating, setIsCreating] = useState(false)
   const [newWorkbookName, setNewWorkbookName] = useState("")
   const [newWorkbookDescription, setNewWorkbookDescription] = useState("")
-  const [workbooks, setWorkbooks] = useState<Workbook[]>([])
-  const [loading, setLoading] = useState(true)
-  const [creating, setCreating] = useState(false)
-
-  // Load workbooks from API
-  useEffect(() => {
-    loadWorkbooks()
-  }, [])
-
-  const loadWorkbooks = async () => {
-    try {
-      setLoading(true)
-      const response = await fetch('/api/workbooks')
-      const data = await response.json()
-      setWorkbooks(data.workbooks || [])
-    } catch (error) {
-      console.error('Failed to load workbooks:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleCreateWorkbook = async () => {
-    if (!newWorkbookName.trim()) return
-
-    try {
-      setCreating(true)
-      const response = await fetch('/api/workbooks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newWorkbookName,
-          org_id: 'default_org',
-        }),
-      })
-
-      if (!response.ok) {
-        throw new Error('Failed to create workbook')
-      }
 
   // Load workbooks on mount
   useEffect(() => {
@@ -144,7 +105,7 @@ export function WorkbooksView() {
       workbook.description.toLowerCase().includes(searchQuery.toLowerCase()),
   )
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center">
         <div className="text-center">
@@ -249,8 +210,8 @@ export function WorkbooksView() {
             </Dialog>
           </div>
 
-          {/* All Workbooks */}
-          {filteredWorkbooks.length > 0 && (
+          {/* Workbooks Grid */}
+          {filteredWorkbooks.length > 0 ? (
             <div>
               <h3 className="mb-4 font-sans text-lg font-semibold text-foreground">
                 Your Workbooks
@@ -260,30 +221,11 @@ export function WorkbooksView() {
                   <WorkbookCard 
                     key={workbook.id} 
                     workbook={workbook}
-                    formatDate={formatDate}
                   />
                 ))}
               </div>
             </div>
-          )}
-
-          {/* All Workbooks */}
-          <div>
-            <h3 className="mb-4 font-sans text-lg font-semibold text-foreground">
-              {starredWorkbooks.length > 0 ? "All Workbooks" : "Your Workbooks"}
-            </h3>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {otherWorkbooks.map((workbook) => (
-                <WorkbookCard key={workbook.id} workbook={workbook} />
-              ))}
-            </div>
-          </div>
-
-          {isLoading ? (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-              <div className="mb-4 text-muted-foreground">Loading workbooks...</div>
-            </div>
-          ) : filteredWorkbooks.length === 0 ? (
+          ) : (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <FileText className="mb-4 h-12 w-12 text-muted-foreground" />
               <h3 className="mb-2 font-sans text-lg font-semibold text-foreground">No workbooks found</h3>
@@ -297,7 +239,7 @@ export function WorkbooksView() {
                 </Button>
               )}
             </div>
-          ) : null}
+          )}
         </div>
       </div>
     </div>

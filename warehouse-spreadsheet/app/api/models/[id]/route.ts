@@ -8,10 +8,10 @@ import { getServerSupabaseClient } from '@/lib/supabase/client';
  */
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const modelId = params.id;
+    const { id: modelId } = await params;
     const body = await request.json();
     
     console.log(`[Update Model API] Updating model ${modelId}`, body);
@@ -103,10 +103,10 @@ export async function PATCH(
  */
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const modelId = params.id;
+    const { id: modelId } = await params;
     const supabase = getServerSupabaseClient();
 
     // Delete the model (cascades to metrics and materialized data via FK constraints)

@@ -5,10 +5,10 @@ import type { Grain } from '@/types';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { name: string } }
+  { params }: { params: Promise<{ name: string }> }
 ) {
   try {
-    const { name } = params;
+    const { name } = await params;
     const searchParams = request.nextUrl.searchParams;
 
     // Validate metric name

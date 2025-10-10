@@ -52,7 +52,6 @@ type NumberFormatOption = NonNullable<CellFormat['numberFormat']>
 export type SaveStatus = 'saved' | 'saving' | 'unsaved' | 'error'
 
 interface SpreadsheetToolbarProps {
-  workbookName?: string
   saveStatus?: SaveStatus
   onSave?: () => void
   onInsertMetric?: () => void
@@ -65,7 +64,6 @@ interface SpreadsheetToolbarProps {
 }
 
 export function SpreadsheetToolbar({
-  workbookName = "Untitled Workbook",
   saveStatus = 'saved',
   onSave,
   onInsertMetric,
@@ -90,22 +88,22 @@ export function SpreadsheetToolbar({
   const saveStatusConfig = {
     saved: {
       text: 'Saved',
-      color: 'bg-success',
+      color: 'bg-green-500',
       variant: 'outline' as const
     },
     saving: {
       text: 'Saving...',
-      color: 'bg-warning animate-pulse',
+      color: 'bg-yellow-500 animate-pulse',
       variant: 'outline' as const
     },
     unsaved: {
       text: 'Unsaved',
-      color: 'bg-muted',
+      color: 'bg-gray-400',
       variant: 'outline' as const
     },
     error: {
       text: 'Error',
-      color: 'bg-destructive',
+      color: 'bg-red-500',
       variant: 'destructive' as const
     }
   }
