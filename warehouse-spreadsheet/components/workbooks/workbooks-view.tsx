@@ -1,6 +1,7 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -24,68 +25,79 @@ import {
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 
-const workbooks = [
-  {
-    id: 1,
-    name: "Q1 2024 Financial Model",
-    description: "Quarterly financial planning and analysis",
-    lastModified: "2 hours ago",
-    author: "Sarah Chen",
-    starred: true,
-    scenarios: 3,
-  },
-  {
-    id: 2,
-    name: "Annual Budget Planning",
-    description: "Full year budget with department breakdowns",
-    lastModified: "1 day ago",
-    author: "Mike Johnson",
-    starred: true,
-    scenarios: 5,
-  },
-  {
-    id: 3,
-    name: "Revenue Forecast 2024",
-    description: "Sales pipeline and revenue projections",
-    lastModified: "3 days ago",
-    author: "Sarah Chen",
-    starred: false,
-    scenarios: 2,
-  },
-  {
-    id: 4,
-    name: "Executive Dashboard",
-    description: "High-level KPIs and metrics for leadership",
-    lastModified: "5 days ago",
-    author: "Alex Kim",
-    starred: false,
-    scenarios: 1,
-  },
-  {
-    id: 5,
-    name: "Product Profitability Analysis",
-    description: "Margin analysis by product line",
-    lastModified: "1 week ago",
-    author: "Mike Johnson",
-    starred: false,
-    scenarios: 4,
-  },
-  {
-    id: 6,
-    name: "Customer Cohort Analysis",
-    description: "Retention and LTV metrics by cohort",
-    lastModified: "2 weeks ago",
-    author: "Alex Kim",
-    starred: false,
-    scenarios: 2,
-  },
-]
+interface Workbook {
+  id: string
+  name: string
+  description: string
+  created_at: string
+  updated_at: string
+  last_opened_at: string | null
+  starred?: boolean
+  scenarios?: number
+  author?: string
+}
 
 export function WorkbooksView() {
+  const router = useRouter()
+  const [workbooks, setWorkbooks] = useState<Workbook[]>([])
+  const [isLoading, setIsLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState("")
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
+  const [isCreating, setIsCreating] = useState(false)
   const [newWorkbookName, setNewWorkbookName] = useState("")
   const [newWorkbookDescription, setNewWorkbookDescription] = useState("")
+
+  // Load workbooks on mount
+  useEffect(() => {
+    loadWorkbooks()
+  }, [])
+
+  const loadWorkbooks = async () => {
+    try {
+      setIsLoading(true)
+      const response = await fetch('/api/workbooks')
+      if (!response.ok) throw new Error('Failed to fetch workbooks')
+      const data = await response.json()
+      setWorkbooks(data.workbooks || [])
+    } catch (error) {
+      console.error('Error loading workbooks:', error)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleCreateWorkbook = async () => {
+    if (!newWorkbookName.trim()) return
+
+    try {
+      setIsCreating(true)
+      const response = await fetch('/api/workbooks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newWorkbookName,
+          description: newWorkbookDescription
+        })
+      })
+
+      if (!response.ok) throw new Error('Failed to create workbook')
+      
+      const data = await response.json()
+      
+      // Close dialog and reset form
+      setIsCreateDialogOpen(false)
+      setNewWorkbookName("")
+      setNewWorkbookDescription("")
+      
+      // Redirect to the new workbook
+      router.push(`/workbook?id=${data.workbook.id}`)
+    } catch (error) {
+      console.error('Error creating workbook:', error)
+      alert('Failed to create workbook. Please try again.')
+    } finally {
+      setIsCreating(false)
+    }
+  }
 
   const filteredWorkbooks = workbooks.filter(
     (workbook) =>
@@ -172,10 +184,19 @@ export function WorkbooksView() {
                   </div>
                 </div>
                 <DialogFooter>
-                  <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>
+                  <Button 
+                    variant="outline" 
+                    onClick={() => setIsCreateDialogOpen(false)}
+                    disabled={isCreating}
+                  >
                     Cancel
                   </Button>
-                  <Button onClick={() => setIsCreateDialogOpen(false)}>Create Workbook</Button>
+                  <Button 
+                    onClick={handleCreateWorkbook}
+                    disabled={isCreating || !newWorkbookName.trim()}
+                  >
+                    {isCreating ? "Creating..." : "Create Workbook"}
+                  </Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
@@ -208,7 +229,11 @@ export function WorkbooksView() {
             </div>
           </div>
 
-          {filteredWorkbooks.length === 0 && (
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <div className="mb-4 text-muted-foreground">Loading workbooks...</div>
+            </div>
+          ) : filteredWorkbooks.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <FileText className="mb-4 h-12 w-12 text-muted-foreground" />
               <h3 className="mb-2 font-sans text-lg font-semibold text-foreground">No workbooks found</h3>
@@ -222,25 +247,39 @@ export function WorkbooksView() {
                 </Button>
               )}
             </div>
-          )}
+          ) : null}
         </div>
       </div>
     </div>
   )
 }
 
-function WorkbookCard({ workbook }: { workbook: (typeof workbooks)[0] }) {
+function WorkbookCard({ workbook }: { workbook: Workbook }) {
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString)
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+    const diffHours = Math.floor(diffMs / 3600000)
+    const diffDays = Math.floor(diffMs / 86400000)
+
+    if (diffMins < 60) return `${diffMins} minute${diffMins !== 1 ? 's' : ''} ago`
+    if (diffHours < 24) return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`
+    if (diffDays < 7) return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`
+    return date.toLocaleDateString()
+  }
+
   return (
     <Card className="group transition-shadow hover:shadow-md">
       <CardHeader>
         <div className="flex items-start justify-between">
           <div className="flex-1">
             <CardTitle className="mb-1 text-base">
-              <a href="/workbook" className="hover:text-primary">
+              <a href={`/workbook?id=${workbook.id}`} className="hover:text-primary">
                 {workbook.name}
               </a>
             </CardTitle>
-            <CardDescription className="text-xs">{workbook.description}</CardDescription>
+            <CardDescription className="text-xs">{workbook.description || 'No description'}</CardDescription>
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -249,9 +288,11 @@ function WorkbookCard({ workbook }: { workbook: (typeof workbooks)[0] }) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem>
-                <FileText className="mr-2 h-4 w-4" />
-                Open
+              <DropdownMenuItem asChild>
+                <a href={`/workbook?id=${workbook.id}`}>
+                  <FileText className="mr-2 h-4 w-4" />
+                  Open
+                </a>
               </DropdownMenuItem>
               <DropdownMenuItem>
                 {workbook.starred ? (
@@ -282,20 +323,24 @@ function WorkbookCard({ workbook }: { workbook: (typeof workbooks)[0] }) {
       <CardContent>
         <div className="space-y-2">
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
-            <div className="flex items-center gap-1.5">
-              <User className="h-3.5 w-3.5" />
-              <span>{workbook.author}</span>
-            </div>
+            {workbook.author && (
+              <div className="flex items-center gap-1.5">
+                <User className="h-3.5 w-3.5" />
+                <span>{workbook.author}</span>
+              </div>
+            )}
             <div className="flex items-center gap-1.5">
               <Clock className="h-3.5 w-3.5" />
-              <span>{workbook.lastModified}</span>
+              <span>{formatDate(workbook.updated_at)}</span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="text-xs">
-              {workbook.scenarios} scenario{workbook.scenarios !== 1 ? "s" : ""}
-            </Badge>
-          </div>
+          {workbook.scenarios !== undefined && (
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="text-xs">
+                {workbook.scenarios} scenario{workbook.scenarios !== 1 ? "s" : ""}
+              </Badge>
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>

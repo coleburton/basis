@@ -17,10 +17,10 @@ export interface QueryContext {
   endDate: string; // ISO date string, e.g., '2024-03-31'
 
   // Optional: Additional filters from workbook data connection
-  globalFilters?: Record<string, string | number>;
+  globalFilters?: Record<string, string | number | string[]>;
 
   // Optional: Dimension filters (e.g., region='US')
-  dimensionFilters?: Record<string, string | number>;
+  dimensionFilters?: Record<string, string | number | string[]>;
 }
 
 export class QueryBuilder {
@@ -147,7 +147,11 @@ export class QueryBuilder {
   /**
    * Build a simple equality filter
    */
-  private buildSimpleFilter(column: string, value: string | number): string {
+  private buildSimpleFilter(column: string, value: string | number | string[]): string {
+    if (Array.isArray(value)) {
+      const values = value.map((v) => this.formatValue(v)).join(', ');
+      return `${column} IN (${values})`;
+    }
     return `${column} = ${this.formatValue(value)}`;
   }
 

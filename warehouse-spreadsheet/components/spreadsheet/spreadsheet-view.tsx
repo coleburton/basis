@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState, useCallback } from "react"
+import { useSearchParams } from "next/navigation"
 import { FormulaBar } from "./formula-bar"
 import { SpreadsheetToolbar } from "./spreadsheet-toolbar"
 import { SpreadsheetGrid, type SpreadsheetGridHandle, type MetricRangeConfig } from "./spreadsheet-grid"
@@ -22,6 +23,7 @@ interface CellFormat {
 }
 
 export function SpreadsheetView() {
+  const searchParams = useSearchParams()
   const [activeCell, setActiveCell] = useState({ row: 0, col: 0 })
   const [formula, setFormula] = useState("")
   const [isInsertMetricOpen, setIsInsertMetricOpen] = useState(false)
@@ -35,11 +37,13 @@ export function SpreadsheetView() {
     isFormula: false,
     sheetId: null,
   })
+  const workbookIdFromUrl = searchParams.get('id')
 
   const gridRef = useRef<SpreadsheetGridHandle>(null)
   const formulaUpdateFromGrid = useRef(false)
-  const detectedRangesRef = useRef<DetectedDateRange[]>([])
-  const lastGridDataHashRef = useRef<string>("")
+  // Track detected ranges per sheet
+  const detectedRangesBySheetRef = useRef<Record<string, DetectedDateRange[]>>({})
+  const lastGridDataHashBySheetRef = useRef<Record<string, string>>({})
 
   // Update metric cells periodically (metricRanges come from activeSheet)
   useEffect(() => {
@@ -58,47 +62,46 @@ export function SpreadsheetView() {
     return () => clearInterval(interval)
   }, [])
 
-  // Detect date ranges whenever grid data changes
-  useEffect(() => {
-    const detectRanges = () => {
-      const gridData = gridRef.current?.getGridData()
-      if (!gridData) return
+  // Pass refs down to inner component for date detection
+  const detectRangesCallback = useCallback((sheetId: string) => {
+    const gridDataWithDisplay = gridRef.current?.getGridDataWithDisplay()
+    if (!gridDataWithDisplay || !sheetId) return
 
-      // Early bailout: Check if grid data has actually changed
-      // Use a simple hash of the first few cells to avoid expensive comparison
-      const gridHash = gridData.slice(0, 10).map(row =>
-        row.slice(0, 10).map(cell => cell.raw).join('|')
-      ).join('||')
+    // Early bailout: Check if grid data has actually changed for this sheet
+    const gridHash = gridDataWithDisplay.slice(0, 10).map(row =>
+      row.slice(0, 10).map(cell => cell.display).join('|')
+    ).join('||')
 
-      if (gridHash === lastGridDataHashRef.current) {
-        return
-      }
-
-      lastGridDataHashRef.current = gridHash
-
-      const newRanges = detectAllDateRanges(gridData, detectedRangesRef.current)
-      if (JSON.stringify(newRanges) !== JSON.stringify(detectedRangesRef.current)) {
-        detectedRangesRef.current = newRanges
-        setDetectedRanges(newRanges)
-
-        // Set timeout to mark ranges as not new after 3 seconds
-        setTimeout(() => {
-          setDetectedRanges(prev => {
-            const updated = prev.map(r => ({ ...r, isNew: false }))
-            detectedRangesRef.current = updated
-            return updated
-          })
-        }, 3000)
-      }
+    if (gridHash === lastGridDataHashBySheetRef.current[sheetId]) {
+      return
     }
 
-    // Run detection initially
-    detectRanges()
+    lastGridDataHashBySheetRef.current[sheetId] = gridHash
 
-    // Set up periodic checking (every 2 seconds instead of 500ms)
-    const interval = setInterval(detectRanges, 2000)
+    // Get previous ranges for this sheet
+    const previousRanges = detectedRangesBySheetRef.current[sheetId] || []
+    const newRanges = detectAllDateRanges(gridDataWithDisplay, previousRanges)
 
-    return () => clearInterval(interval)
+    if (JSON.stringify(newRanges) !== JSON.stringify(previousRanges)) {
+      detectedRangesBySheetRef.current[sheetId] = newRanges
+      setDetectedRanges(newRanges)
+
+      // Set timeout to mark ranges as not new after 3 seconds
+      setTimeout(() => {
+        // Update the stored ranges for this sheet
+        const currentRanges = detectedRangesBySheetRef.current[sheetId]
+        if (currentRanges) {
+          const updated = currentRanges.map(r => ({ ...r, isNew: false }))
+          detectedRangesBySheetRef.current[sheetId] = updated
+
+          // Update state to trigger re-render
+          setDetectedRanges(updated)
+        }
+      }, 3000)
+    } else {
+      // Even if ranges haven't changed, update state in case we switched sheets
+      setDetectedRanges(newRanges)
+    }
   }, [])
 
   const handleGridFormulaChange = (value: string, _sheetId?: string) => {
@@ -221,7 +224,7 @@ export function SpreadsheetView() {
   }, [])
 
   return (
-    <WorkbookProvider>
+    <WorkbookProvider initialWorkbookId={workbookIdFromUrl}>
       <SpreadsheetViewInner
         formula={formula}
         activeCell={activeCell}
@@ -254,6 +257,7 @@ export function SpreadsheetView() {
         handleCellClickWrapper={handleCellClickWrapper}
         gridEditingState={gridEditingState}
         onGridEditingStateChange={setGridEditingState}
+        detectRangesCallback={detectRangesCallback}
       />
     </WorkbookProvider>
   )
@@ -291,12 +295,13 @@ interface SpreadsheetViewInnerProps {
   handleCellClickWrapper: (cell: { row: number; col: number }) => void
   gridEditingState: { isEditing: boolean; isFormula: boolean; sheetId: string | null }
   onGridEditingStateChange: (state: { isEditing: boolean; isFormula: boolean; sheetId: string | null }) => void
+  detectRangesCallback: (sheetId: string) => void
 }
 
 // Inner component that has access to WorkbookContext
 function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
-  const { activeSheet } = useWorkbook()
-  
+  const { activeSheet, workbookName, saveStatus, saveWorkbook } = useWorkbook()
+
   // Get metric ranges from active sheet
   const metricRanges = activeSheet?.metricRanges ?? {}
 
@@ -332,9 +337,27 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
     handleCellClickWrapper,
     gridEditingState,
     onGridEditingStateChange,
+    detectRangesCallback,
   } = props
 
   const isFormulaEditing = gridEditingState.isEditing && gridEditingState.isFormula
+
+  // Detect date ranges for the active sheet
+  useEffect(() => {
+    if (!activeSheet?.id) return
+
+    const detectRanges = () => {
+      detectRangesCallback(activeSheet.id)
+    }
+
+    // Run detection initially
+    detectRanges()
+
+    // Set up periodic checking (every 2 seconds)
+    const interval = setInterval(detectRanges, 2000)
+
+    return () => clearInterval(interval)
+  }, [activeSheet?.id, detectRangesCallback])
 
   const handleSheetMouseDown = useCallback((sheetId: string) => {
     if (isFormulaEditing) {
@@ -346,6 +369,9 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
     <div className="flex h-screen flex-col bg-background">
       {/* Top Toolbar */}
       <SpreadsheetToolbar
+        workbookName={workbookName}
+        saveStatus={saveStatus}
+        onSave={saveWorkbook}
         onInsertMetric={() => {
           setEditingMetricRange(null)
           setIsInsertMetricOpen(true)
@@ -428,7 +454,7 @@ function SpreadsheetViewInner(props: SpreadsheetViewInnerProps) {
       <InsertMetricDialog
         open={isInsertMetricOpen}
         onOpenChange={setIsInsertMetricOpen}
-        gridData={gridRef.current?.getGridData()}
+        gridData={gridRef.current?.getGridDataWithDisplay()}
         activeCell={activeCell}
         detectedRanges={detectedRanges}
         gridRef={gridRef}
