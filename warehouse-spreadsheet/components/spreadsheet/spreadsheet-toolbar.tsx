@@ -28,6 +28,7 @@ import {
   Calendar,
 } from "lucide-react"
 import Link from "next/link"
+import { useWorkbook } from "@/lib/workbook/workbook-context"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,6 +37,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Badge } from "@/components/ui/badge"
+import { cn } from "@/lib/utils"
 
 interface CellFormat {
   bold?: boolean
@@ -74,6 +76,7 @@ export function SpreadsheetToolbar({
   onNumberFormat,
   currentFormat
 }: SpreadsheetToolbarProps) {
+  const { workbookName } = useWorkbook()
   const numberFormat = currentFormat?.numberFormat ?? 'general'
   const numberFormatLabels: Record<NumberFormatOption, string> = {
     general: 'Number',

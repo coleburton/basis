@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Database, ChevronLeft, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { detectAllDateRanges, type DetectedDateRange } from "@/lib/date-detection"
-import { WorkbookProvider, useWorkbook, type MetricCellResult } from "@/lib/workbook/workbook-context"
+import { useWorkbook, type MetricCellResult } from "@/lib/workbook/workbook-context"
 
 interface CellFormat {
   bold?: boolean
@@ -38,6 +38,21 @@ export function SpreadsheetView() {
     sheetId: null,
   })
   const workbookIdFromUrl = searchParams.get('id')
+
+  // Manual save function
+  const handleSave = async () => {
+    if (!workbookId || !saveWorkbookData) return
+    
+    setSaving(true)
+    try {
+      await saveWorkbookData(workbookId)
+      console.log('[SpreadsheetView] ✅ Saved successfully')
+    } catch (error) {
+      console.error('[SpreadsheetView] Save error:', error)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   const gridRef = useRef<SpreadsheetGridHandle>(null)
   const formulaUpdateFromGrid = useRef(false)
@@ -264,6 +279,10 @@ export function SpreadsheetView() {
 }
 
 interface SpreadsheetViewInnerProps {
+  workbookId?: string
+  saving: boolean
+  hasUnsavedChanges: boolean
+  handleSave: () => void
   formula: string
   activeCell: { row: number; col: number }
   isInsertMetricOpen: boolean

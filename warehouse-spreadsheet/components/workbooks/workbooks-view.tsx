@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Search, Plus, Table2, Clock, User, MoreVertical, Copy, Trash2, FileText, Star, StarOff } from "lucide-react"
+import { Search, Plus, Table2, Clock, User, MoreVertical, Copy, Trash2, FileText, Star, StarOff, RefreshCw } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -46,6 +46,45 @@ export function WorkbooksView() {
   const [isCreating, setIsCreating] = useState(false)
   const [newWorkbookName, setNewWorkbookName] = useState("")
   const [newWorkbookDescription, setNewWorkbookDescription] = useState("")
+  const [workbooks, setWorkbooks] = useState<Workbook[]>([])
+  const [loading, setLoading] = useState(true)
+  const [creating, setCreating] = useState(false)
+
+  // Load workbooks from API
+  useEffect(() => {
+    loadWorkbooks()
+  }, [])
+
+  const loadWorkbooks = async () => {
+    try {
+      setLoading(true)
+      const response = await fetch('/api/workbooks')
+      const data = await response.json()
+      setWorkbooks(data.workbooks || [])
+    } catch (error) {
+      console.error('Failed to load workbooks:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleCreateWorkbook = async () => {
+    if (!newWorkbookName.trim()) return
+
+    try {
+      setCreating(true)
+      const response = await fetch('/api/workbooks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newWorkbookName,
+          org_id: 'default_org',
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to create workbook')
+      }
 
   // Load workbooks on mount
   useEffect(() => {
@@ -105,8 +144,16 @@ export function WorkbooksView() {
       workbook.description.toLowerCase().includes(searchQuery.toLowerCase()),
   )
 
-  const starredWorkbooks = filteredWorkbooks.filter((w) => w.starred)
-  const otherWorkbooks = filteredWorkbooks.filter((w) => !w.starred)
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <div className="text-center">
+          <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-2 text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">Loading workbooks...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -202,16 +249,19 @@ export function WorkbooksView() {
             </Dialog>
           </div>
 
-          {/* Starred Workbooks */}
-          {starredWorkbooks.length > 0 && (
-            <div className="mb-8">
-              <h3 className="mb-4 flex items-center gap-2 font-sans text-lg font-semibold text-foreground">
-                <Star className="h-4 w-4 fill-warning text-warning" />
-                Starred
+          {/* All Workbooks */}
+          {filteredWorkbooks.length > 0 && (
+            <div>
+              <h3 className="mb-4 font-sans text-lg font-semibold text-foreground">
+                Your Workbooks
               </h3>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {starredWorkbooks.map((workbook) => (
-                  <WorkbookCard key={workbook.id} workbook={workbook} />
+                {filteredWorkbooks.map((workbook) => (
+                  <WorkbookCard 
+                    key={workbook.id} 
+                    workbook={workbook}
+                    formatDate={formatDate}
+                  />
                 ))}
               </div>
             </div>

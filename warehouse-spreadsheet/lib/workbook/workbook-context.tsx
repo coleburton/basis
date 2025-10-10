@@ -140,19 +140,31 @@ export function WorkbookProvider({
   const [workbookName, setWorkbookName] = useState<string>("Untitled Workbook")
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
 
+  const [workbookName, setWorkbookName] = useState<string>("Untitled Workbook")
   const [sheets, setSheets] = useState<Sheet[]>(() => [
     {
       id: nanoid(),
       name: "Sheet1",
-      gridData: createInitialGridData(),
+      gridData: createEmptyGridData(),
       metricRanges: {},
       metricCells: {},
     }
   ])
 
   const [activeSheetId, setActiveSheetId] = useState<string>(() => sheets[0]?.id || "")
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
 
   const activeSheet = sheets.find(s => s.id === activeSheetId) || null
+  
+  const markDirty = useCallback(() => {
+    setHasUnsavedChanges(true)
+  }, [])
+  
+  const markClean = useCallback(() => {
+    setHasUnsavedChanges(false)
+    setLastSavedAt(new Date())
+  }, [])
 
   const addSheet = useCallback((name?: string) => {
     const newSheetId = nanoid()
@@ -205,18 +217,21 @@ export function WorkbookProvider({
     setSheets(prev => prev.map(sheet =>
       sheet.id === sheetId ? { ...sheet, gridData } : sheet
     ))
-  }, [])
+    markDirty()
+  }, [markDirty])
 
   const updateSheetMetricRanges = useCallback((sheetId: string, metricRanges: Record<string, MetricRangeConfig>) => {
     setSheets(prev => prev.map(sheet =>
       sheet.id === sheetId ? { ...sheet, metricRanges } : sheet
     ))
-  }, [])
+    markDirty()
+  }, [markDirty])
 
   const updateSheetMetricCells = useCallback((sheetId: string, metricCells: Record<string, MetricCellResult>) => {
     setSheets(prev => prev.map(sheet =>
       sheet.id === sheetId ? { ...sheet, metricCells } : sheet
     ))
+    // Don't mark dirty for metric cell updates - these are calculated values, not user edits
   }, [])
 
   const getSheet = useCallback((sheetId: string): Sheet | null => {
